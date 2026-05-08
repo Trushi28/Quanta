@@ -1,12 +1,11 @@
 // ============================================================
 //  sched/sched.c — Preemptive round-robin scheduler
 //
-//  v2.1 fixes:
-//   • sched_run_next keeps interrupts disabled across the
-//     spinlock-release → sched_switch gap to prevent the
-//     APIC timer from corrupting the scheduler state mid-switch.
-//   • task_trampoline explicitly re-enables interrupts on
-//     first entry (entered with IRQs disabled by the above).
+//  SMP Fixes:
+//   • Implemented isolated Per-CPU idle tasks to prevent stack
+//     corruption and NULL dereferences on APs.
+//   • Idle tasks are isolated from the global run_queue.
+//   • Fixed TASK_SLEEPING fallback logic to correctly idle.
 // ============================================================
 #include "sched.h"
 #include "../cpu/smp.h"
@@ -27,19 +26,14 @@ static uint32_t next_pid = 1;
 static uint64_t g_tick = 0;
 
 static task_t *cpu_current[MAX_CPUS];
+static task_t *idle_tasks[MAX_CPUS];
 
 // ── task_trampoline ───────────────────────────────────────────────────────
-// Every new task enters here on its first scheduled run.
-// At entry: rbx = fn, rbp = arg (set by setup_initial_stack).
-// Interrupts are DISABLED here (held off since the context switch
-// in sched_run_next kept them disabled through the switch).
-// We re-enable them before calling the task function.
 static void task_trampoline(void) {
   task_fn_t fn;
   void *arg;
   __asm__ volatile("mov %%rbx,%0\n mov %%rbp,%1" : "=r"(fn), "=r"(arg));
 
-  // Safe to enable interrupts now — we are fully in the new task context.
   __asm__ volatile("sti");
 
   fn(arg);
@@ -47,18 +41,6 @@ static void task_trampoline(void) {
 }
 
 // ── setup_initial_stack ───────────────────────────────────────────────────
-// Builds the initial register frame so that sched_switch's pop sequence
-// leaves rbx=fn, rbp=arg, and returns into task_trampoline.
-//
-// sched_switch pops in order: r15, r14, r13, r12, rbx, rbp  then ret.
-// Stack layout from RSP (lowest address) upward:
-//   [RSP+ 0] r15 = 0
-//   [RSP+ 8] r14 = 0
-//   [RSP+16] r13 = 0
-//   [RSP+24] r12 = 0
-//   [RSP+32] rbx = fn
-//   [RSP+40] rbp = arg
-//   [RSP+48] rip = task_trampoline
 static void setup_initial_stack(task_t *t, task_fn_t fn, void *arg) {
   uint64_t *sp = (uint64_t *)(t->stack + t->stack_size);
 
@@ -133,12 +115,16 @@ static void idle_fn(void *arg) {
 
 // ── sched_init ────────────────────────────────────────────────────────────
 void sched_init(void) {
-  task_t *idle = task_create("idle/0", idle_fn, NULL, 8192);
-  if (!idle)
-    kpanic("[SCHED] Cannot create idle task\n");
-  idle->state = TASK_RUNNING;
-  cpu_current[0] = idle;
-  kprintf("[SCHED] Scheduler initialised  pid=1 idle task ready\n");
+  // Generate a dedicated, isolated idle task for every potential CPU
+  for (int i = 0; i < MAX_CPUS; i++) {
+    task_t *idle = task_create("idle", idle_fn, NULL, 8192);
+    if (!idle)
+      kpanic("[SCHED] Cannot create idle task\n");
+    idle->state = TASK_RUNNING;
+    idle_tasks[i] = idle;
+    cpu_current[i] = idle;
+  }
+  kprintf("[SCHED] Scheduler initialised  %u SMP idle tasks ready\n", MAX_CPUS);
 }
 
 task_t *sched_current(void) {
@@ -149,56 +135,44 @@ task_t *sched_current(void) {
 uint64_t sched_uptime_ms(void) { return g_tick; }
 
 // ── sched_run_next ────────────────────────────────────────────────────────
-// THE CRITICAL FIX:
-//   We acquire the lock with interrupt-save (CLI + spinlock).
-//   We RELEASE the spinlock alone (spinlock_release, NOT irq_release)
-//   before sched_switch, keeping interrupts DISABLED through the switch.
-//   This closes the race window where an APIC timer interrupt could fire
-//   between "cpu_current updated" and "sched_switch executed", which
-//   would corrupt the incoming task's initial stack context.
-//
-//   When a RESUMED task returns from sched_switch, it re-enables
-//   interrupts itself (using the saved rflags).
-//   When a NEW task starts for the first time, task_trampoline
-//   calls sti before invoking the task function.
 static void sched_run_next(void) {
   uint32_t cpu_id = cpu_local()->cpu_id;
   task_t *cur = cpu_current[cpu_id];
 
-  // Acquire lock AND disable interrupts atomically.
   uint64_t rflags = spinlock_irq_acquire(&sched_lock);
 
-  // Re-queue current task if it is still runnable.
-  if (cur && cur->state == TASK_RUNNING) {
+  // Re-queue current task ONLY if it is a normal, runnable task.
+  // Explicitly prevent CPU idle tasks from entering the global run queue.
+  if (cur && cur->state == TASK_RUNNING && cur != idle_tasks[cpu_id]) {
     cur->state = TASK_RUNNABLE;
     list_append(&run_queue, &cur->list);
   }
 
-  // Pick next task.
   list_node_t *next_node = list_pop_front(&run_queue);
+  task_t *next;
+
   if (!next_node) {
-    // Nothing to run — stay on current task.
-    if (cur)
-      cur->state = TASK_RUNNING;
-    spinlock_irq_release(&sched_lock, rflags);
-    return;
+    // Nothing in the queue. Fallback to this specific CPU's isolated idle task.
+    next = idle_tasks[cpu_id];
+  } else {
+    next = container_of(next_node, task_t, list);
   }
 
-  task_t *next = container_of(next_node, task_t, list);
   next->state = TASK_RUNNING;
   cpu_current[cpu_id] = next;
 
-  // Release the spinlock WITHOUT restoring interrupts.
-  // Interrupts remain disabled until after sched_switch completes.
   spinlock_release(&sched_lock);
 
   if (cur != next) {
-    sched_switch(&cur->ctx, next->ctx);
-    // We arrive here when THIS task is switched back in.
-    // Interrupts are still disabled — restore them now.
+    if (cur) {
+      sched_switch(&cur->ctx, next->ctx);
+    } else {
+      // Fallback for first-time AP initialization if cur is unexpectedly NULL
+      task_ctx_t *dummy;
+      sched_switch(&dummy, next->ctx);
+    }
   }
 
-  // Re-enable interrupts if they were enabled when we yielded.
   if (rflags & (1ULL << 9))
     __asm__ volatile("sti");
 }

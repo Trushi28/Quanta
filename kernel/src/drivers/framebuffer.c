@@ -2,7 +2,7 @@
 //  drivers/framebuffer.c  —  Pixel-mode text terminal
 //
 //  Draws characters using an embedded 8×16 VGA-style bitmap font.
-//  Supports scrolling, colour changes, and basic control characters.
+//  Includes an ANSI Escape Code State Machine to support terminal colors.
 // ============================================================
 
 #include "framebuffer.h"
@@ -11,8 +11,6 @@
 
 // ---------------------------------------------------------------------------
 // Embedded 8×16 bitmap font (ASCII 0x20–0x7E)
-//   Each character = 16 bytes, one byte per row, MSB = leftmost pixel.
-//   Based on the classic IBM VGA ROM font (public domain in this form).
 // ---------------------------------------------------------------------------
 #define FONT_W 8
 #define FONT_H 16
@@ -216,55 +214,126 @@ static const uint8_t font8x16[128][16] = {
 // Terminal state
 // ---------------------------------------------------------------------------
 static struct {
-    uint32_t *base;       // framebuffer memory (mapped by Limine)
-    uint32_t  width;      // pixels
-    uint32_t  height;     // pixels
-    uint32_t  pitch;      // bytes per scanline → we store as pixels (pitch/4)
+  uint32_t *base;  // framebuffer memory (mapped by Limine)
+  uint32_t width;  // pixels
+  uint32_t height; // pixels
+  uint32_t pitch;  // bytes per scanline → we store as pixels (pitch/4)
 
-    uint32_t  cols;       // character columns
-    uint32_t  rows;       // character rows
+  uint32_t cols; // character columns
+  uint32_t rows; // character rows
 
-    uint32_t  cursor_x;   // current column
-    uint32_t  cursor_y;   // current row
+  uint32_t cursor_x; // current column
+  uint32_t cursor_y; // current row
 
-    uint32_t  fg;         // foreground colour (XRGB)
-    uint32_t  bg;         // background colour (XRGB)
+  uint32_t fg; // foreground colour (XRGB)
+  uint32_t bg; // background colour (XRGB)
+
+  // --- ANSI State Machine Variables ---
+  int ansi_state;          // 0 = NORMAL, 1 = ESC, 2 = CSI
+  uint32_t ansi_params[8]; // Buffer for numbers like 96 in \033[96m
+  int ansi_pcount;         // How many parameters we've parsed
 } term;
+
+// ---------------------------------------------------------------------------
+// Internal: ANSI color mapping logic
+// ---------------------------------------------------------------------------
+static uint32_t ansi_color_to_hex(uint32_t code) {
+  switch (code) {
+  // Standard colors
+  case 30:
+    return 0x000000; // Black
+  case 31:
+    return 0xAA0000; // Red
+  case 32:
+    return 0x00AA00; // Green
+  case 33:
+    return 0xAA5500; // Yellow
+  case 34:
+    return 0x0000AA; // Blue
+  case 35:
+    return 0xAA00AA; // Magenta
+  case 36:
+    return 0x00AAAA; // Cyan
+  case 37:
+    return 0xAAAAAA; // White
+
+  // High-intensity colors (90-97)
+  case 90:
+    return 0x555555; // Bright Black (Gray)
+  case 91:
+    return 0xFF5555; // Bright Red
+  case 92:
+    return 0x55FF55; // Bright Green
+  case 93:
+    return 0xFFFF55; // Bright Yellow
+  case 94:
+    return 0x5555FF; // Bright Blue
+  case 95:
+    return 0xFF55FF; // Bright Magenta
+  case 96:
+    return 0x55FFFF; // Bright Cyan
+  case 97:
+    return 0xFFFFFF; // Bright White
+  default:
+    return term.fg; // Fallback
+  }
+}
+
+static void apply_ansi_sgr(void) {
+  if (term.ansi_pcount == 0) {
+    // "ESC[m" or "ESC[0m" means reset
+    term.fg = 0xFFFFFF;
+    term.bg = 0x000000;
+    return;
+  }
+
+  for (int i = 0; i < term.ansi_pcount; i++) {
+    uint32_t p = term.ansi_params[i];
+    if (p == 0) {
+      term.fg = 0xFFFFFF;
+      term.bg = 0x000000;
+    } else if ((p >= 30 && p <= 37) || (p >= 90 && p <= 97)) {
+      term.fg = ansi_color_to_hex(p);
+    } else if (p >= 40 && p <= 47) {
+      // Background colors
+      term.bg = ansi_color_to_hex(p - 10);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Internal: draw a single glyph at (col, row)
 // ---------------------------------------------------------------------------
 static void draw_glyph(uint32_t col, uint32_t row, char ch) {
-    const uint8_t *glyph = font8x16[(uint8_t)ch < 128 ? (uint8_t)ch : '?'];
-    uint32_t base_x = col * FONT_W;
-    uint32_t base_y = row * FONT_H;
+  const uint8_t *glyph = font8x16[(uint8_t)ch < 128 ? (uint8_t)ch : '?'];
+  uint32_t base_x = col * FONT_W;
+  uint32_t base_y = row * FONT_H;
 
-    for (uint32_t y = 0; y < FONT_H; y++) {
-        uint8_t row_bits = glyph[y];
-        for (uint32_t x = 0; x < FONT_W; x++) {
-            uint32_t px = base_x + x;
-            uint32_t py = base_y + y;
-            uint32_t color = (row_bits & (0x80 >> x)) ? term.fg : term.bg;
-            term.base[py * term.pitch + px] = color;
-        }
+  for (uint32_t y = 0; y < FONT_H; y++) {
+    uint8_t row_bits = glyph[y];
+    for (uint32_t x = 0; x < FONT_W; x++) {
+      uint32_t px = base_x + x;
+      uint32_t py = base_y + y;
+      uint32_t color = (row_bits & (0x80 >> x)) ? term.fg : term.bg;
+      term.base[py * term.pitch + px] = color;
     }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Internal: scroll the terminal up one line
 // ---------------------------------------------------------------------------
 static void scroll_up(void) {
-    // Move everything up by one character row
-    size_t row_bytes = (size_t)FONT_H * term.pitch * sizeof(uint32_t);
-    memmove(term.base,
-            term.base + FONT_H * term.pitch,
-            row_bytes * (term.rows - 1));
+  // Move everything up by one character row
+  size_t row_bytes = (size_t)FONT_H * term.pitch * sizeof(uint32_t);
+  memmove(term.base, term.base + FONT_H * term.pitch,
+          row_bytes * (term.rows - 1));
 
-    // Clear the last row
-    uint32_t *last = term.base + (term.rows - 1) * FONT_H * term.pitch;
-    for (uint32_t y = 0; y < FONT_H; y++)
-        for (uint32_t x = 0; x < term.width; x++)
-            last[y * term.pitch + x] = term.bg;
+  // Clear the last row
+  uint32_t *last = term.base + (term.rows - 1) * FONT_H * term.pitch;
+  for (uint32_t y = 0; y < FONT_H; y++)
+    for (uint32_t x = 0; x < term.width; x++)
+      last[y * term.pitch + x] = term.bg;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,87 +341,138 @@ static void scroll_up(void) {
 // ---------------------------------------------------------------------------
 
 void fb_init(struct limine_framebuffer *fb) {
-    term.base   = (uint32_t *)fb->address;
-    term.width  = (uint32_t)fb->width;
-    term.height = (uint32_t)fb->height;
-    term.pitch  = (uint32_t)(fb->pitch / 4); // bytes → pixels
+  term.base = (uint32_t *)fb->address;
+  term.width = (uint32_t)fb->width;
+  term.height = (uint32_t)fb->height;
+  term.pitch = (uint32_t)(fb->pitch / 4); // bytes → pixels
 
-    term.cols = term.width  / FONT_W;
-    term.rows = term.height / FONT_H;
+  term.cols = term.width / FONT_W;
+  term.rows = term.height / FONT_H;
 
-    term.cursor_x = 0;
-    term.cursor_y = 0;
+  term.cursor_x = 0;
+  term.cursor_y = 0;
 
-    term.fg = FB_COLOR_WHITE;
-    term.bg = FB_COLOR_BLACK;
+  term.fg = FB_COLOR_WHITE;
+  term.bg = FB_COLOR_BLACK;
 
-    fb_clear();
+  term.ansi_state = 0;
+  term.ansi_pcount = 0;
+  for (int i = 0; i < 8; i++) {
+    term.ansi_params[i] = 0;
+  }
+
+  fb_clear();
 }
 
 void fb_set_color(uint32_t fg, uint32_t bg) {
-    term.fg = fg;
-    term.bg = bg;
+  term.fg = fg;
+  term.bg = bg;
 }
 
 void fb_clear(void) {
-    for (uint32_t y = 0; y < term.height; y++)
-        for (uint32_t x = 0; x < term.width; x++)
-            term.base[y * term.pitch + x] = term.bg;
-    term.cursor_x = 0;
-    term.cursor_y = 0;
+  for (uint32_t y = 0; y < term.height; y++)
+    for (uint32_t x = 0; x < term.width; x++)
+      term.base[y * term.pitch + x] = term.bg;
+  term.cursor_x = 0;
+  term.cursor_y = 0;
 }
 
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
-    if (x < term.width && y < term.height)
-        term.base[y * term.pitch + x] = color;
+  if (x < term.width && y < term.height)
+    term.base[y * term.pitch + x] = color;
 }
 
 void fb_get_size(uint32_t *cols, uint32_t *rows) {
-    if (cols) *cols = term.cols;
-    if (rows) *rows = term.rows;
+  if (cols)
+    *cols = term.cols;
+  if (rows)
+    *rows = term.rows;
 }
 
 void fb_putchar(char c) {
-    if (!term.base) return;
+  if (!term.base)
+    return;
 
-    switch (c) {
-        case '\n':
-            term.cursor_x = 0;
-            term.cursor_y++;
-            break;
-        case '\r':
-            term.cursor_x = 0;
-            break;
-        case '\t':
-            term.cursor_x = (term.cursor_x + 8) & ~7u;
-            break;
-        case '\b':
-            if (term.cursor_x > 0) {
-                term.cursor_x--;
-                draw_glyph(term.cursor_x, term.cursor_y, ' ');
-            }
-            break;
-        default:
-            if ((uint8_t)c >= 0x20) {
-                draw_glyph(term.cursor_x, term.cursor_y, c);
-                term.cursor_x++;
-            }
-            break;
+  // --- ANSI State Machine ---
+  if (term.ansi_state == 1) { // ESC SEEN
+    if (c == '[') {
+      term.ansi_state = 2; // Move to CSI
+      term.ansi_pcount = 0;
+      term.ansi_params[0] = 0;
+    } else {
+      term.ansi_state = 0; // Abort, unknown escape
     }
+    return;
+  } else if (term.ansi_state == 2) { // CSI SEEN
+    if (c >= '0' && c <= '9') {
+      // Accumulate multi-digit numbers
+      term.ansi_params[term.ansi_pcount] =
+          (term.ansi_params[term.ansi_pcount] * 10) + (c - '0');
+    } else if (c == ';') {
+      // Move to next parameter
+      if (term.ansi_pcount < 7) {
+        term.ansi_pcount++;
+        term.ansi_params[term.ansi_pcount] = 0;
+      }
+    } else if (c == 'm') {
+      // 'm' is SGR (Select Graphic Rendition) - Apply Colors
+      term.ansi_pcount++; // Increment to include the final parsed parameter
+      apply_ansi_sgr();
+      term.ansi_state = 0; // Return to normal text
+    } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+      // We hit a command letter we don't support yet
+      // Just ignore it and reset state to avoid getting stuck.
+      term.ansi_state = 0;
+    }
+    return;
+  }
 
-    // Wrap columns
-    if (term.cursor_x >= term.cols) {
-        term.cursor_x = 0;
-        term.cursor_y++;
-    }
+  // Trigger state machine entry
+  if (c == '\033') {
+    term.ansi_state = 1;
+    return;
+  }
 
-    // Scroll if needed
-    while (term.cursor_y >= term.rows) {
-        scroll_up();
-        term.cursor_y--;
+  // --- Normal Drawing Logic ---
+  switch (c) {
+  case '\n':
+    term.cursor_x = 0;
+    term.cursor_y++;
+    break;
+  case '\r':
+    term.cursor_x = 0;
+    break;
+  case '\t':
+    term.cursor_x = (term.cursor_x + 8) & ~7u;
+    break;
+  case '\b':
+    if (term.cursor_x > 0) {
+      term.cursor_x--;
+      draw_glyph(term.cursor_x, term.cursor_y, ' ');
     }
+    break;
+  default:
+    if ((uint8_t)c >= 0x20) {
+      draw_glyph(term.cursor_x, term.cursor_y, c);
+      term.cursor_x++;
+    }
+    break;
+  }
+
+  // Wrap columns
+  if (term.cursor_x >= term.cols) {
+    term.cursor_x = 0;
+    term.cursor_y++;
+  }
+
+  // Scroll if needed
+  while (term.cursor_y >= term.rows) {
+    scroll_up();
+    term.cursor_y--;
+  }
 }
 
 void fb_puts(const char *s) {
-    while (*s) fb_putchar(*s++);
+  while (*s)
+    fb_putchar(*s++);
 }
