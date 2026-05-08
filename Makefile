@@ -65,7 +65,8 @@ CFLAGS := \
     -I$(KERNEL_DIR)/include         \
     -I$(SRC_DIR)                    \
     -DQUANTA_VERSION=\"2.0.0\"      \
-    -DQUANTA_ARCH=\"x86_64\"
+    -DQUANTA_ARCH=\"x86_64\"        \
+    -Wa,--noexecstack 
 
 # ---------------------------------------------------------------------------
 # Linker flags
@@ -75,7 +76,8 @@ LDFLAGS := \
     -nostdlib                       \
     -static                         \
     -z max-page-size=0x1000         \
-    --no-dynamic-linker
+    --no-dynamic-linker             \
+    -z noexecstack
 
 # ---------------------------------------------------------------------------
 # Limine bootloader
