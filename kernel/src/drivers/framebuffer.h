@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
 #include <limine.h>
+#include <stdint.h>
 
 // ---------------------------------------------------------------------------
 //  drivers/framebuffer.h  —  Pixel-mode text terminal
@@ -13,14 +13,14 @@
 // ---------------------------------------------------------------------------
 
 // Default palette
-#define FB_COLOR_BLACK   0x000000
-#define FB_COLOR_WHITE   0xFFFFFF
-#define FB_COLOR_GREEN   0x00FF00
-#define FB_COLOR_RED     0xFF4444
-#define FB_COLOR_YELLOW  0xFFFF00
-#define FB_COLOR_CYAN    0x00FFFF
-#define FB_COLOR_GRAY    0xAAAAAA
-#define FB_COLOR_DKGRAY  0x555555
+#define FB_COLOR_BLACK 0x000000
+#define FB_COLOR_WHITE 0xFFFFFF
+#define FB_COLOR_GREEN 0x00FF00
+#define FB_COLOR_RED 0xFF4444
+#define FB_COLOR_YELLOW 0xFFFF00
+#define FB_COLOR_CYAN 0x00FFFF
+#define FB_COLOR_GRAY 0xAAAAAA
+#define FB_COLOR_DKGRAY 0x555555
 
 // Initialise the terminal using the first Limine framebuffer.
 // Must be called after limine_verify_requests().
@@ -43,3 +43,12 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color);
 
 // Query terminal size in character cells.
 void fb_get_size(uint32_t *cols, uint32_t *rows);
+
+// Query current cursor position in character cells.
+void fb_get_cursor(uint32_t *cx, uint32_t *cy);
+
+// Draw / erase an underline cursor at the current cursor position.
+// Use fb_draw_cursor() after printing the prompt; fb_erase_cursor() before
+// printing output so the cursor bar doesn't overlap text.
+void fb_draw_cursor(void);
+void fb_erase_cursor(void);

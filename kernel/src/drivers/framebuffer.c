@@ -14,12 +14,16 @@
 #include <stddef.h>
 
 // ---------------------------------------------------------------------------
-// Embedded 8×16 bitmap font (ASCII 0x20–0x7E)
+// Embedded 8×16 CP437 bitmap font (256 entries)
+// Entries 0x20–0x7E: standard ASCII
+// Entries 0xB0–0xCE, 0xD9–0xDF, 0xFE: CP437 box-drawing + block chars
+// All unlisted entries are zero (renders as blank).
 // ---------------------------------------------------------------------------
 #define FONT_W 8
 #define FONT_H 16
 
-static const uint8_t font8x16[128][16] = {
+// clang-format off
+static const uint8_t font_cp437[256][16] = {
     // 0x20  SPACE
     [0x20]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
     [0x21]={0x00,0x00,0x18,0x3C,0x3C,0x3C,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00},
@@ -116,7 +120,93 @@ static const uint8_t font8x16[128][16] = {
     [0x7C]={0x00,0x00,0x18,0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x18,0x18,0x00,0x00,0x00,0x00},
     [0x7D]={0x00,0x00,0x70,0x18,0x18,0x18,0x0E,0x18,0x18,0x18,0x18,0x70,0x00,0x00,0x00,0x00},
     [0x7E]={0x00,0x00,0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+
+    // -----------------------------------------------------------------------
+    // CP437 extended: block shades (0xB0-0xB2)
+    // -----------------------------------------------------------------------
+    // 0xB0 ░ light shade
+    [0xB0]={0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA},
+    // 0xB1 ▒ medium shade
+    [0xB1]={0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55},
+    // 0xB2 ▓ dark shade
+    [0xB2]={0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77},
+
+    // -----------------------------------------------------------------------
+    // CP437 single-line box drawing
+    // Vertical center cols 3-4 = 0x18; horizontal mid row = row 7
+    // -----------------------------------------------------------------------
+    // 0xB3 │ vertical single
+    [0xB3]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
+    // 0xB4 ┤ right T (vertical + left horiz)
+    [0xB4]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xF8,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
+
+    // -----------------------------------------------------------------------
+    // CP437 double-line box drawing
+    // Double vertical: cols 1-2 and 5-6 = 0x66
+    // Double horizontal: rows 6 and 8 = 0xFF
+    // -----------------------------------------------------------------------
+    // 0xB9 ╣ double right T
+    [0xB9]={0x66,0x66,0x66,0x66,0x66,0x66,0xFE,0x60,0xE0,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
+    // 0xBA ║ double vertical
+    [0xBA]={0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
+    // 0xBB ╗ double top-right
+    [0xBB]={0x00,0x00,0x00,0x00,0x00,0x00,0xFE,0x60,0xE0,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
+    // 0xBC ╝ double bottom-right
+    [0xBC]={0x66,0x66,0x66,0x66,0x66,0x66,0xFE,0x60,0xE0,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xBF ┐ single top-right
+    [0xBF]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xF8,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
+    // 0xC0 └ single bottom-left
+    [0xC0]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x1F,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xC1 ┴ single bottom T
+    [0xC1]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xC2 ┬ single top T
+    [0xC2]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
+    // 0xC3 ├ single left T
+    [0xC3]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x1F,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
+    // 0xC4 ─ single horizontal
+    [0xC4]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xC5 ┼ single cross
+    [0xC5]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xFF,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
+    // 0xC8 ╚ double bottom-left
+    [0xC8]={0x66,0x66,0x66,0x66,0x66,0x66,0x7F,0x06,0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xC9 ╔ double top-left
+    [0xC9]={0x00,0x00,0x00,0x00,0x00,0x00,0x7F,0x06,0x07,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
+    // 0xCA ╩ double bottom T
+    [0xCA]={0x66,0x66,0x66,0x66,0x66,0x66,0xFF,0x66,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xCB ╦ double top T
+    [0xCB]={0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x66,0xFF,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
+    // 0xCC ╠ double left T
+    [0xCC]={0x66,0x66,0x66,0x66,0x66,0x66,0x7F,0x06,0x07,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
+    // 0xCD ═ double horizontal
+    [0xCD]={0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xCE ╬ double cross
+    [0xCE]={0x66,0x66,0x66,0x66,0x66,0x66,0xFF,0x66,0xFF,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
+    // 0xD9 ┘ single bottom-right
+    [0xD9]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xF8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+    // 0xDA ┌ single top-left
+    [0xDA]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1F,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
+
+    // -----------------------------------------------------------------------
+    // CP437 block elements (0xDB–0xDF)
+    // -----------------------------------------------------------------------
+    // 0xDB █ full block
+    [0xDB]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF},
+    // 0xDC ▄ lower half block
+    [0xDC]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF},
+    // 0xDD ▌ left half block
+    [0xDD]={0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0},
+    // 0xDE ▐ right half block
+    [0xDE]={0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F},
+    // 0xDF ▀ upper half block
+    [0xDF]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
+
+    // -----------------------------------------------------------------------
+    // Misc useful glyphs
+    // -----------------------------------------------------------------------
+    // 0xFE ■ small filled square (bullet)
+    [0xFE]={0x00,0x00,0x00,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x00,0x00,0x00,0x00},
 };
+// clang-format on
 
 // ---------------------------------------------------------------------------
 // Terminal state
@@ -125,7 +215,7 @@ static struct {
   uint32_t *base;
   uint32_t width;
   uint32_t height;
-  uint32_t pitch;   // in pixels (bytes/4)
+  uint32_t pitch; // in pixels (bytes/4)
 
   uint32_t cols;
   uint32_t rows;
@@ -137,14 +227,14 @@ static struct {
   uint32_t bg;
 
   // ANSI State Machine
-  int ansi_state;          // 0=NORMAL, 1=ESC, 2=CSI
+  int ansi_state; // 0=NORMAL, 1=ESC, 2=CSI
   uint32_t ansi_params[8];
   int ansi_pcount;
 
   // UTF-8 State Machine
-  int utf8_rem;            // remaining continuation bytes
-  uint32_t utf8_cp;        // accumulated codepoint
-  int utf8_expect;         // total bytes expected
+  int utf8_rem;     // remaining continuation bytes
+  uint32_t utf8_cp; // accumulated codepoint
+  int utf8_expect;  // total bytes expected
 } term;
 
 // ---------------------------------------------------------------------------
@@ -152,36 +242,110 @@ static struct {
 // ---------------------------------------------------------------------------
 static char utf8_map(uint32_t cp) {
   switch (cp) {
-    // Dashes
-    case 0x2014: case 0x2013: case 0x2010: case 0x2011: return '-';
-    // Box drawing → simple ASCII
-    case 0x2500: case 0x2501: case 0x2550: return '=';
-    case 0x2502: case 0x2503: case 0x2551: return '|';
-    case 0x250C: case 0x250F: case 0x2554: return '+';
-    case 0x2510: case 0x2513: case 0x2557: return '+';
-    case 0x2514: case 0x2517: case 0x255A: return '+';
-    case 0x2518: case 0x251B: case 0x255D: return '+';
-    case 0x251C: case 0x2523: case 0x2560: return '+';
-    case 0x2524: case 0x252B: case 0x2563: return '+';
-    case 0x252C: case 0x2533: case 0x2566: return '+';
-    case 0x2534: case 0x253B: case 0x2569: return '+';
-    case 0x253C: case 0x254B: case 0x256C: return '+';
-    // Block elements → '#'
-    case 0x2588: case 0x2589: case 0x258A: case 0x258B:
-    case 0x258C: case 0x258D: case 0x258E: case 0x258F:
-    case 0x2590: case 0x2591: case 0x2592: case 0x2593:
-      return '#';
-    // Arrows
-    case 0x2190: return '<';
-    case 0x2191: return '^';
-    case 0x2192: return '>';
-    case 0x2193: return 'v';
-    // Bullets / dots
-    case 0x2022: return '*';
-    case 0xB7:   return '.';
-    // Common Latin-1
-    case 0xA9: return 'C'; // copyright
-    default: return 0;     // unknown → will print '?'
+  // ── Dashes ───────────────────────────────────────────────────────────
+  case 0x2014:
+  case 0x2013:
+  case 0x2010:
+  case 0x2011:
+    return '-';
+  // ── Single-line box drawing → CP437 ─────────────────────────────────
+  case 0x2500:
+  case 0x2501:
+    return (char)0xC4; // ─
+  case 0x2502:
+  case 0x2503:
+    return (char)0xB3; // │
+  case 0x250C:
+  case 0x250F:
+    return (char)0xDA; // ┌
+  case 0x2510:
+  case 0x2513:
+    return (char)0xBF; // ┐
+  case 0x2514:
+  case 0x2517:
+    return (char)0xC0; // └
+  case 0x2518:
+  case 0x251B:
+    return (char)0xD9; // ┘
+  case 0x251C:
+  case 0x2523:
+    return (char)0xC3; // ├
+  case 0x2524:
+  case 0x252B:
+    return (char)0xB4; // ┤
+  case 0x252C:
+  case 0x2533:
+    return (char)0xC2; // ┬
+  case 0x2534:
+  case 0x253B:
+    return (char)0xC1; // ┴
+  case 0x253C:
+  case 0x254B:
+    return (char)0xC5; // ┼
+  // ── Double-line box drawing → CP437 ─────────────────────────────────
+  case 0x2550:
+    return (char)0xCD; // ═
+  case 0x2551:
+    return (char)0xBA; // ║
+  case 0x2554:
+    return (char)0xC9; // ╔
+  case 0x2557:
+    return (char)0xBB; // ╗
+  case 0x255A:
+    return (char)0xC8; // ╚
+  case 0x255D:
+    return (char)0xBC; // ╝
+  case 0x2560:
+    return (char)0xCC; // ╠
+  case 0x2563:
+    return (char)0xB9; // ╣
+  case 0x2566:
+    return (char)0xCB; // ╦
+  case 0x2569:
+    return (char)0xCA; // ╩
+  case 0x256C:
+    return (char)0xCE; // ╬
+  // ── Block elements → CP437 ──────────────────────────────────────────
+  case 0x2588:
+  case 0x2589:
+  case 0x258A:
+  case 0x258B:
+  case 0x258C:
+  case 0x258D:
+  case 0x258E:
+  case 0x258F:
+    return (char)0xDB; // █
+  case 0x2590:
+    return (char)0xDE; // ▐
+  case 0x2584:
+    return (char)0xDC; // ▄
+  case 0x2580:
+    return (char)0xDF; // ▀
+  case 0x2591:
+    return (char)0xB0; // ░
+  case 0x2592:
+    return (char)0xB1; // ▒
+  case 0x2593:
+    return (char)0xB2; // ▓
+  // ── Arrows ───────────────────────────────────────────────────────────
+  case 0x2190:
+    return '<';
+  case 0x2191:
+    return '^';
+  case 0x2192:
+    return '>';
+  case 0x2193:
+    return 'v';
+  // ── Bullets / misc ───────────────────────────────────────────────────
+  case 0x2022:
+  case 0x25AA:
+    return (char)0xFE; // ■
+  case 0x00B7:
+    return '.';
+  case 0x00A9:
+    return 'C'; // copyright
+  default:
+    return 0;
   }
 }
 
@@ -189,9 +353,8 @@ static char utf8_map(uint32_t cp) {
 // Internal: draw a single glyph at (col, row)
 // ---------------------------------------------------------------------------
 static void draw_glyph(uint32_t col, uint32_t row, char ch) {
-  uint8_t idx = (uint8_t)ch;
-  if (idx > 0x7F) idx = '?';
-  const uint8_t *glyph = font8x16[idx];
+  uint8_t idx = (uint8_t)ch; // 0-255 — directly indexes font_cp437
+  const uint8_t *glyph = font_cp437[idx];
   uint32_t base_x = col * FONT_W;
   uint32_t base_y = row * FONT_H;
 
@@ -200,7 +363,8 @@ static void draw_glyph(uint32_t col, uint32_t row, char ch) {
     for (uint32_t x = 0; x < FONT_W; x++) {
       uint32_t px = base_x + x;
       uint32_t py = base_y + y;
-      if (px >= term.width || py >= term.height) continue;
+      if (px >= term.width || py >= term.height)
+        continue;
       uint32_t color = (row_bits & (0x80 >> x)) ? term.fg : term.bg;
       term.base[py * term.pitch + px] = color;
     }
@@ -226,23 +390,40 @@ static void scroll_up(void) {
 // ---------------------------------------------------------------------------
 static uint32_t ansi_color_to_hex(uint32_t code) {
   switch (code) {
-  case 30: return 0x000000;
-  case 31: return 0xAA0000;
-  case 32: return 0x00AA00;
-  case 33: return 0xAA5500;
-  case 34: return 0x0000AA;
-  case 35: return 0xAA00AA;
-  case 36: return 0x00AAAA;
-  case 37: return 0xAAAAAA;
-  case 90: return 0x555555;
-  case 91: return 0xFF5555;
-  case 92: return 0x55FF55;
-  case 93: return 0xFFFF55;
-  case 94: return 0x5555FF;
-  case 95: return 0xFF55FF;
-  case 96: return 0x55FFFF;
-  case 97: return 0xFFFFFF;
-  default: return term.fg;
+  case 30:
+    return 0x000000;
+  case 31:
+    return 0xAA0000;
+  case 32:
+    return 0x00AA00;
+  case 33:
+    return 0xAA5500;
+  case 34:
+    return 0x0000AA;
+  case 35:
+    return 0xAA00AA;
+  case 36:
+    return 0x00AAAA;
+  case 37:
+    return 0xAAAAAA;
+  case 90:
+    return 0x555555;
+  case 91:
+    return 0xFF5555;
+  case 92:
+    return 0x55FF55;
+  case 93:
+    return 0xFFFF55;
+  case 94:
+    return 0x5555FF;
+  case 95:
+    return 0xFF55FF;
+  case 96:
+    return 0x55FFFF;
+  case 97:
+    return 0xFFFFFF;
+  default:
+    return term.fg;
   }
 }
 
@@ -286,10 +467,11 @@ void fb_init(struct limine_framebuffer *fb) {
 
   term.ansi_state = 0;
   term.ansi_pcount = 0;
-  for (int i = 0; i < 8; i++) term.ansi_params[i] = 0;
+  for (int i = 0; i < 8; i++)
+    term.ansi_params[i] = 0;
 
   term.utf8_rem = 0;
-  term.utf8_cp  = 0;
+  term.utf8_cp = 0;
   term.utf8_expect = 0;
 
   fb_clear();
@@ -314,15 +496,18 @@ void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
 }
 
 void fb_get_size(uint32_t *cols, uint32_t *rows) {
-  if (cols) *cols = term.cols;
-  if (rows) *rows = term.rows;
+  if (cols)
+    *cols = term.cols;
+  if (rows)
+    *rows = term.rows;
 }
 
 // ---------------------------------------------------------------------------
 // fb_putchar — now UTF-8 aware and ANSI hardened
 // ---------------------------------------------------------------------------
 void fb_putchar(char c) {
-  if (!term.base) return;
+  if (!term.base)
+    return;
 
   uint8_t uc = (uint8_t)c;
 
@@ -330,10 +515,19 @@ void fb_putchar(char c) {
   if (uc >= 0x80) {
     if (term.utf8_rem == 0) {
       // New multi-byte sequence
-      if ((uc & 0xE0) == 0xC0) { term.utf8_expect = 2; term.utf8_cp = uc & 0x1F; }
-      else if ((uc & 0xF0) == 0xE0) { term.utf8_expect = 3; term.utf8_cp = uc & 0x0F; }
-      else if ((uc & 0xF8) == 0xF0) { term.utf8_expect = 4; term.utf8_cp = uc & 0x07; }
-      else { fb_putchar('?'); return; } // invalid start
+      if ((uc & 0xE0) == 0xC0) {
+        term.utf8_expect = 2;
+        term.utf8_cp = uc & 0x1F;
+      } else if ((uc & 0xF0) == 0xE0) {
+        term.utf8_expect = 3;
+        term.utf8_cp = uc & 0x0F;
+      } else if ((uc & 0xF8) == 0xF0) {
+        term.utf8_expect = 4;
+        term.utf8_cp = uc & 0x07;
+      } else {
+        fb_putchar('?');
+        return;
+      } // invalid start
       term.utf8_rem = term.utf8_expect - 1;
     } else {
       // Continuation byte expected
@@ -376,17 +570,45 @@ void fb_putchar(char c) {
       term.ansi_pcount++;
       apply_ansi_sgr();
       term.ansi_state = 0;
-    } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-      // Unsupported CSI command — silently drop
+    } else if (c == 'C') { // cursor forward (right)
+      uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
+      term.cursor_x =
+          (term.cursor_x + n < term.cols) ? term.cursor_x + n : term.cols - 1;
       term.ansi_state = 0;
-    } else if (c == '\x1b') {
-      // Another ESC inside CSI? abort current, start new
-      term.ansi_state = 1;
+    } else if (c == 'D') { // cursor backward (left)
+      uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
+      term.cursor_x = (term.cursor_x >= n) ? term.cursor_x - n : 0;
+      term.ansi_state = 0;
+    } else if (c == 'A') { // cursor up
+      uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
+      term.cursor_y = (term.cursor_y >= n) ? term.cursor_y - n : 0;
+      term.ansi_state = 0;
+    } else if (c == 'B') { // cursor down
+      uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
+      term.cursor_y =
+          (term.cursor_y + n < term.rows) ? term.cursor_y + n : term.rows - 1;
+      term.ansi_state = 0;
+    } else if (c == 'H' || c == 'f') { // cursor position (row;col, 1-based)
+      uint32_t r = term.ansi_params[0] ? term.ansi_params[0] - 1 : 0;
+      uint32_t cl = (term.ansi_pcount > 1 && term.ansi_params[1])
+                        ? term.ansi_params[1] - 1
+                        : 0;
+      term.cursor_y = (r < term.rows) ? r : term.rows - 1;
+      term.cursor_x = (cl < term.cols) ? cl : term.cols - 1;
+      term.ansi_state = 0;
+    } else if (c == 'J') { // erase in display (2J = full clear)
+      if (term.ansi_params[0] == 2)
+        fb_clear();
+      term.ansi_state = 0;
+    } else if (c == 'K') { // erase to end of line
+      for (uint32_t x = term.cursor_x; x < term.cols; x++)
+        draw_glyph(x, term.cursor_y, ' ');
+      term.ansi_state = 0;
+    } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+      // Any other CSI letter — drop silently, don't get stuck
+      term.ansi_state = 0;
     }
-    // Any other char inside CSI (like cursor movement sequences)
-    // We don't support them yet, but we must not get stuck.
-    // If we see something weird, just stay in CSI until a letter arrives.
-    return;
+    return; // still inside CSI (or just handled it) — don't draw anything
   }
 
   if (c == '\x1b') {
@@ -434,5 +656,38 @@ void fb_putchar(char c) {
 }
 
 void fb_puts(const char *s) {
-  while (*s) fb_putchar(*s++);
+  while (*s)
+    fb_putchar(*s++);
+}
+
+// ---------------------------------------------------------------------------
+// Cursor helpers — underline-style cursor for the shell input line
+// ---------------------------------------------------------------------------
+void fb_get_cursor(uint32_t *cx, uint32_t *cy) {
+  if (cx)
+    *cx = term.cursor_x;
+  if (cy)
+    *cy = term.cursor_y;
+}
+
+void fb_draw_cursor(void) {
+  if (!term.base)
+    return;
+  uint32_t bx = term.cursor_x * FONT_W;
+  uint32_t by = term.cursor_y * FONT_H + FONT_H - 3; // bottom 2 rows of cell
+  for (uint32_t y = 0; y < 2; y++)
+    for (uint32_t x = 0; x < FONT_W; x++)
+      if (bx + x < term.width && by + y < term.height)
+        term.base[(by + y) * term.pitch + (bx + x)] = term.fg;
+}
+
+void fb_erase_cursor(void) {
+  if (!term.base)
+    return;
+  uint32_t bx = term.cursor_x * FONT_W;
+  uint32_t by = term.cursor_y * FONT_H + FONT_H - 3;
+  for (uint32_t y = 0; y < 2; y++)
+    for (uint32_t x = 0; x < FONT_W; x++)
+      if (bx + x < term.width && by + y < term.height)
+        term.base[(by + y) * term.pitch + (bx + x)] = term.bg;
 }
