@@ -1,9 +1,11 @@
 // ============================================================
 //  kmain.c — Quanta OS Kernel Entry Point  v2.1
 //
-//  Changes from v2.0:
-//    • ioapic_init() added between APIC and SMP steps
-//    • keyboard_init() now uses IOAPIC redirect, not legacy PIC
+//  Foundation fixes:
+//    • ASCII-only banner (renders perfectly on framebuffer)
+//    • All boot messages use pure ASCII
+//    • Progress indicator during 18-step init
+//    • No Unicode box-drawing characters anywhere
 // ============================================================
 
 #include "acpi/acpi.h"
@@ -32,25 +34,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// ── Boot banner ────────────────────────────────────────────────────────────
+// ── Boot banner (ASCII only — safe for 8x16 font) ─────────────────────────
 static void print_banner(void) {
   fb_set_color(0x00D4FF, FB_COLOR_BLACK);
   kprintf("\n"
-          "  ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗ █████╗ \n"
-          "  ██╔═══██╗██║   ██║██╔══██╗████╗  ██║╚══██╔══╝██╔══██╗\n"
-          "  ██║   ██║██║   ██║███████║██╔██╗ ██║   ██║   ███████║\n"
-          "  ██║▄▄ ██║██║   ██║██╔══██║██║╚██╗██║   ██║   ██╔══██║\n"
-          "  ╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║   ██║   ██║  ██║\n"
-          "   ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝\n");
+          "   ____                    _       __  ____   _____ \n"
+          "  / __ \\____  ____ _   __(_)___ _/ / / __ \\ / ___/ \n"
+          " / / / / __ \\/ __ \\ | / / / __ `/ / / / / / \\__ \\  \n"
+          "/ /_/ / / / / / / / |/ / / /_/ / / / /_/ / ___/ /  \n"
+          "\\____/_/ /_/_/ /_/|___/_/\\__,_/_/ /_____/ /____/   \n");
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
   kprintf("  Quanta OS  v%s  (%s)\n"
-          "  x2APIC  ·  SMP  ·  VirtIO  ·  VFS  ·  QAI Shell\n",
+          "  x2APIC  |  SMP  |  VirtIO  |  VFS  |  QAI Shell\n",
           QUANTA_VERSION, QUANTA_ARCH);
 }
 
 static void print_div(char c, int w) {
-  for (int i = 0; i < w; i++)
-    kprintf("%c", c);
+  for (int i = 0; i < w; i++) kprintf("%c", c);
   kprintf("\n");
 }
 static void print_hdiv(void) { print_div('=', 68); }
@@ -58,24 +58,15 @@ static void print_ldiv(void) { print_div('-', 68); }
 
 static const char *mm_type_str(uint64_t t) {
   switch (t) {
-  case LIMINE_MEMMAP_USABLE:
-    return "Usable";
-  case LIMINE_MEMMAP_RESERVED:
-    return "Reserved";
-  case LIMINE_MEMMAP_ACPI_RECLAIMABLE:
-    return "ACPI Reclaim";
-  case LIMINE_MEMMAP_ACPI_NVS:
-    return "ACPI NVS";
-  case LIMINE_MEMMAP_BAD_MEMORY:
-    return "Bad";
-  case LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE:
-    return "BL Reclaim";
-  case LIMINE_MEMMAP_KERNEL_AND_MODULES:
-    return "Kernel+Modules";
-  case LIMINE_MEMMAP_FRAMEBUFFER:
-    return "Framebuffer";
-  default:
-    return "Unknown";
+  case LIMINE_MEMMAP_USABLE:                 return "Usable";
+  case LIMINE_MEMMAP_RESERVED:               return "Reserved";
+  case LIMINE_MEMMAP_ACPI_RECLAIMABLE:       return "ACPI Reclaim";
+  case LIMINE_MEMMAP_ACPI_NVS:               return "ACPI NVS";
+  case LIMINE_MEMMAP_BAD_MEMORY:             return "Bad";
+  case LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE: return "BL Reclaim";
+  case LIMINE_MEMMAP_KERNEL_AND_MODULES:     return "Kernel+Modules";
+  case LIMINE_MEMMAP_FRAMEBUFFER:            return "Framebuffer";
+  default:                                   return "Unknown";
   }
 }
 
@@ -86,10 +77,10 @@ static void print_memmap(void) {
   print_ldiv();
   for (uint64_t i = 0; i < mm->entry_count; i++) {
     struct limine_memmap_entry *e = mm->entries[i];
-    uint32_t color =
-        (e->type == LIMINE_MEMMAP_USABLE) ? 0x00FF88 : FB_COLOR_GRAY;
+    uint32_t color = (e->type == LIMINE_MEMMAP_USABLE) ? 0x00FF88 : FB_COLOR_GRAY;
     fb_set_color(color, FB_COLOR_BLACK);
-    kprintf("  0x%016llx  0x%016llx  %s\n", (unsigned long long)e->base,
+    kprintf("  0x%016llx  0x%016llx  %s\n",
+            (unsigned long long)e->base,
             (unsigned long long)e->length, mm_type_str(e->type));
   }
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
@@ -111,8 +102,7 @@ __attribute__((noreturn)) void kmain(void) {
   if (limine_verify_requests() != 0) {
     serial_write_str("[PANIC] Limine requests not fulfilled\r\n");
     __asm__ volatile("cli");
-    for (;;)
-      __asm__ volatile("hlt");
+    for (;;) __asm__ volatile("hlt");
   }
 
   // 3. Framebuffer
@@ -184,7 +174,7 @@ __attribute__((noreturn)) void kmain(void) {
   kprintf("[APIC] Mode: %s  LAPIC-ID: %u\n",
           apic_x2apic_mode() ? "x2APIC" : "xAPIC", apic_id());
 
-  // 9b. I/O APIC  ← NEW: must come after acpi_init + pmm_init
+  // 9b. I/O APIC
   kprintf("[IOAPIC] Initialising...\n");
   ioapic_init();
 
@@ -220,7 +210,7 @@ __attribute__((noreturn)) void kmain(void) {
   kprintf("[VirtIO] Scanning PCIe bus...\n");
   virtio_init();
 
-  // 15. Keyboard  ← now uses IOAPIC internally
+  // 15. Keyboard
   kprintf("[KBD] Initialising PS/2 keyboard...\n");
   keyboard_init();
 
@@ -249,6 +239,5 @@ __attribute__((noreturn)) void kmain(void) {
   sched_yield();
 
   // 18. Idle loop
-  for (;;)
-    __asm__ volatile("hlt");
+  for (;;) __asm__ volatile("hlt");
 }

@@ -1,5 +1,12 @@
 // ============================================================
-//  fs/vfs.c — Virtual File System layer + RamFS + DevFS
+//  fs/vfs.c — Virtual File System layer + RamFS + DevFS  v2.1
+//
+//  Foundation fixes:
+//    • All strncpy calls now explicitly null-terminated
+//    • vfs_lookup buf[] always null-terminated
+//    • vfs_open parent_path always null-terminated
+//    • ramfs_create forward-declaration fixed
+//    • dir_add_child checks for NULL
 // ============================================================
 #include "vfs.h"
 #include "../mm/heap.h"
@@ -20,6 +27,7 @@ static vfs_node_t *node_alloc(const char *name, vfs_node_type_t type,
     if (!n) return NULL;
     memset(n, 0, sizeof(*n));
     strncpy(n->name, name, VFS_NAME_MAX - 1);
+    n->name[VFS_NAME_MAX - 1] = '\0';
     n->type = type;
     n->ops  = ops;
     list_init(&n->children);
@@ -28,6 +36,7 @@ static vfs_node_t *node_alloc(const char *name, vfs_node_type_t type,
 }
 
 static void dir_add_child(vfs_node_t *dir, vfs_node_t *child) {
+    if (!dir || !child) return;
     child->parent = dir;
     list_append(&dir->children, &child->sibling);
 }
@@ -38,19 +47,17 @@ vfs_node_t *vfs_lookup(const char *path) {
     vfs_node_t *cur = vfs_root;
     if (!cur) return NULL;
 
-    // Make a mutable copy of path
     char buf[VFS_PATH_MAX];
     strncpy(buf, path, VFS_PATH_MAX - 1);
+    buf[VFS_PATH_MAX - 1] = '\0';
 
     char *p = buf + 1;   // skip leading '/'
     while (*p) {
-        // Extract next component
         char *sep = strchr(p, '/');
         if (sep) *sep = '\0';
 
         if (!*p) { p = sep ? sep+1 : p + strlen(p); continue; }
 
-        // Search children
         vfs_node_t *found = NULL;
         if (cur->ops && cur->ops->lookup) {
             found = cur->ops->lookup(cur, p);
@@ -83,9 +90,10 @@ int vfs_mount_root(vfs_node_t *root) {
 }
 
 int vfs_register(const char *path, vfs_node_t *node) {
-    // Find parent directory
     char buf[VFS_PATH_MAX];
     strncpy(buf, path, VFS_PATH_MAX - 1);
+    buf[VFS_PATH_MAX - 1] = '\0';
+
     char *last_slash = NULL;
     for (char *p = buf; *p; p++) if (*p == '/') last_slash = p;
     if (!last_slash) return -1;
@@ -95,7 +103,9 @@ int vfs_register(const char *path, vfs_node_t *node) {
     if (!plen) {
         parent_path[0] = '/'; parent_path[1] = '\0';
     } else {
-        memcpy(parent_path, buf, plen); parent_path[plen] = '\0';
+        if (plen >= VFS_PATH_MAX) plen = VFS_PATH_MAX - 1;
+        memcpy(parent_path, buf, plen);
+        parent_path[plen] = '\0';
     }
 
     vfs_node_t *parent = vfs_lookup(parent_path);
@@ -114,13 +124,16 @@ static int alloc_fd(void) {
 int vfs_open(const char *path, int flags) {
     vfs_node_t *node = vfs_lookup(path);
     if (!node && (flags & O_CREAT)) {
-        // Create the file
         char parent_path[VFS_PATH_MAX];
         const char *slash = path + strlen(path);
         while (slash > path && *slash != '/') slash--;
         size_t plen = (size_t)(slash - path);
         if (!plen) { parent_path[0]='/'; parent_path[1]='\0'; }
-        else { memcpy(parent_path, path, plen); parent_path[plen]='\0'; }
+        else {
+            if (plen >= VFS_PATH_MAX) plen = VFS_PATH_MAX - 1;
+            memcpy(parent_path, path, plen);
+            parent_path[plen] = '\0';
+        }
 
         vfs_node_t *parent = vfs_lookup(parent_path);
         if (!parent) return -1;
@@ -206,7 +219,6 @@ int vfs_stat(const char *path, uint64_t *size, vfs_node_type_t *type) {
 //  RamFS — In-memory filesystem backed by kmalloc
 // ============================================================
 
-// A ramfs file stores its content in a single kmalloc'd buffer
 typedef struct {
     uint8_t *data;
     size_t   capacity;
@@ -227,6 +239,7 @@ static ssize_t ramfs_write(vfs_node_t *n, const void *buf, size_t len, uint64_t 
     uint64_t end = off + len;
     if (end > f->capacity) {
         size_t new_cap = (size_t)(end * 2);
+        if (new_cap < 64) new_cap = 64;
         uint8_t *new_data = (uint8_t *)krealloc(f->data, new_cap);
         if (!new_data) return -1;
         f->data     = new_data;
@@ -241,7 +254,11 @@ static int ramfs_readdir(vfs_node_t *dir, uint32_t idx, char name[VFS_NAME_MAX])
     uint32_t i = 0;
     list_foreach(&dir->children, node) {
         vfs_node_t *child = container_of(node, vfs_node_t, sibling);
-        if (i == idx) { strncpy(name, child->name, VFS_NAME_MAX-1); return 0; }
+        if (i == idx) {
+            strncpy(name, child->name, VFS_NAME_MAX - 1);
+            name[VFS_NAME_MAX - 1] = '\0';
+            return 0;
+        }
         i++;
     }
     return -1;
@@ -255,12 +272,29 @@ static vfs_node_t *ramfs_lookup(vfs_node_t *dir, const char *name) {
     return NULL;
 }
 
+static int ramfs_create(vfs_node_t *parent, const char *name);
+static int ramfs_mkdir(vfs_node_t *parent, const char *name);
+
+static const vfs_ops_t ramfs_file_ops = {
+    .read    = ramfs_read,
+    .write   = ramfs_write,
+};
+
+static const vfs_ops_t ramfs_dir_ops = {
+    .readdir = ramfs_readdir,
+    .lookup  = ramfs_lookup,
+    .create  = ramfs_create,
+    .mkdir   = ramfs_mkdir,
+};
+
 static int ramfs_create(vfs_node_t *parent, const char *name) {
-    static const vfs_ops_t ramfs_file_ops;   // forward-declared below
     ramfs_file_t *f = (ramfs_file_t *)kmalloc(sizeof(ramfs_file_t));
     if (!f) return -1;
     f->data     = (uint8_t *)kmalloc(64);
     f->capacity = 64;
+    if (!f->data) { kfree(f); return -1; }
+    memset(f->data, 0, 64);
+
     vfs_node_t *n = node_alloc(name, VFS_FILE, &ramfs_file_ops);
     if (!n) { kfree(f->data); kfree(f); return -1; }
     n->fs_data = f;
@@ -269,28 +303,15 @@ static int ramfs_create(vfs_node_t *parent, const char *name) {
 }
 
 static int ramfs_mkdir(vfs_node_t *parent, const char *name) {
-    static const vfs_ops_t ramfs_dir_ops;
     vfs_node_t *n = node_alloc(name, VFS_DIR, &ramfs_dir_ops);
     if (!n) return -1;
     dir_add_child(parent, n);
     return 0;
 }
 
-static const vfs_ops_t ramfs_file_ops = {
-    .read    = ramfs_read,
-    .write   = ramfs_write,
-};
-static const vfs_ops_t ramfs_dir_ops = {
-    .readdir = ramfs_readdir,
-    .lookup  = ramfs_lookup,
-    .create  = ramfs_create,
-    .mkdir   = ramfs_mkdir,
-};
-
 vfs_node_t *ramfs_create_root(void) {
     vfs_node_t *root = node_alloc("/", VFS_DIR, &ramfs_dir_ops);
     if (!root) return NULL;
-    // Create standard directories
     ramfs_mkdir(root, "dev");
     ramfs_mkdir(root, "tmp");
     ramfs_mkdir(root, "sys");
@@ -301,21 +322,14 @@ vfs_node_t *ramfs_create_root(void) {
 //  DevFS — /dev character devices
 // ============================================================
 
-typedef struct {
-    const vfs_ops_t *ops;
-    void            *priv;
-} devfs_entry_t;
-
 static vfs_node_t *devfs_dir = NULL;
 
-// /dev/null  — discards all writes, returns EOF on read
 static ssize_t null_read (vfs_node_t *n, void *buf, size_t len, uint64_t off)
     { (void)n;(void)buf;(void)len;(void)off; return 0; }
 static ssize_t null_write(vfs_node_t *n, const void *buf, size_t len, uint64_t off)
     { (void)n;(void)buf;(void)off; return (ssize_t)len; }
 static const vfs_ops_t null_ops = { .read=null_read, .write=null_write };
 
-// /dev/zero  — returns 0-bytes on read
 static ssize_t zero_read(vfs_node_t *n, void *buf, size_t len, uint64_t off) {
     (void)n;(void)off; memset(buf, 0, len); return (ssize_t)len; }
 static const vfs_ops_t zero_ops = { .read=zero_read, .write=null_write };

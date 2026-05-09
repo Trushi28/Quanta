@@ -1,10 +1,10 @@
 // ============================================================
-//  shell/qai.c — Quanta AI (QAI) built-in knowledge assistant
+//  shell/qai.c — Quanta AI (QAI) built-in knowledge assistant  v2.1
 //
-//  Keyword-trie matching over a curated knowledge base.
-//  No network, no external model — answers are compiled in.
-//  Each entry has a set of trigger keywords and a response.
-//  The best-matching entry (most keyword hits) is chosen.
+//  Foundation fixes:
+//    • All responses are pure ASCII (safe for framebuffer font)
+//    • No Unicode arrows, dashes, or box-drawing
+//    • Uses ANSI color codes only (30-37, 90-97) which fb handles
 // ============================================================
 #include "qai.h"
 #include "shell.h"
@@ -16,18 +16,15 @@
 #include "../boot/limine_requests.h"
 #include <stddef.h>
 
-// ── Knowledge base entry ──────────────────────────────────────────────────
 typedef struct {
-    const char *keywords[8];   // trigger keywords (NULL-terminated list)
-    const char *response;      // answer text (can include ANSI codes)
+    const char *keywords[8];
+    const char *response;
 } kb_entry_t;
 
-// ── Helper: convert a char to lowercase ───────────────────────────────────
 static char to_lower(char c) {
     return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
 }
 
-// ── Case-insensitive substring search ─────────────────────────────────────
 static int ci_contains(const char *haystack, const char *needle) {
     size_t nl = strlen(needle);
     size_t hl = strlen(haystack);
@@ -44,20 +41,19 @@ static int ci_contains(const char *haystack, const char *needle) {
     return 0;
 }
 
-// ── Knowledge base ────────────────────────────────────────────────────────
 static const kb_entry_t kb[] = {
 
     { {"what","is","quanta",NULL},
       "\033[96mQuanta OS\033[0m is a 64-bit kernel written in C, built from scratch.\n"
       "It features:\n"
-      "  • x2APIC interrupt controller (faster than legacy 8259)\n"
-      "  • SMP — symmetric multiprocessing (up to 64 CPUs)\n"
-      "  • Preemptive round-robin scheduler with per-CPU run queues\n"
-      "  • Slab + free-list kernel heap (kmalloc/kfree)\n"
-      "  • Four-level paging (PML4) with NX bit enforcement\n"
-      "  • VirtIO block device driver (virtio-blk 1.1)\n"
-      "  • Virtual File System (VFS) with ramfs and devfs\n"
-      "  • QAI — this AI assistant, compiled into the kernel\n"
+      "  * x2APIC interrupt controller (faster than legacy 8259)\n"
+      "  * SMP -- symmetric multiprocessing (up to 64 CPUs)\n"
+      "  * Preemptive round-robin scheduler with per-CPU run queues\n"
+      "  * Slab + free-list kernel heap (kmalloc/kfree)\n"
+      "  * Four-level paging (PML4) with NX bit enforcement\n"
+      "  * VirtIO block device driver (virtio-blk 1.1)\n"
+      "  * Virtual File System (VFS) with ramfs and devfs\n"
+      "  * QAI -- this AI assistant, compiled into the kernel\n"
     },
 
     { {"apic","x2apic","interrupt controller",NULL},
@@ -71,13 +67,13 @@ static const kb_entry_t kb[] = {
     },
 
     { {"smp","multiprocessor","multi-core","cpu","cores",NULL},
-      "\033[96mSMP — Symmetric Multi-Processing\033[0m\n"
+      "\033[96mSMP -- Symmetric Multi-Processing\033[0m\n"
       "  Quanta brings up all CPUs reported by the Limine SMP response.\n"
       "  Each AP (application processor) gets its own:\n"
-      "    • GDT + TSS\n"
-      "    • APIC timer (1 ms tick)\n"
-      "    • cpu_local_t struct (accessed via GS base MSR)\n"
-      "    • Run queue entry in the scheduler\n"
+      "    * GDT + TSS\n"
+      "    * APIC timer (1 ms tick)\n"
+      "    * cpu_local_t struct (accessed via GS base MSR)\n"
+      "    * Run queue entry in the scheduler\n"
       "  The BSP (boot strap processor) wakes APs by atomically writing\n"
       "  their goto_address field in the limine_smp_info struct.\n"
     },
@@ -96,7 +92,7 @@ static const kb_entry_t kb[] = {
     { {"paging","virtual memory","vmm","page table","pml4","tlb",NULL},
       "\033[96mVirtual Memory Manager (VMM)\033[0m\n"
       "  Quanta uses x86-64 four-level paging:\n"
-      "    PML4 (512 GB/entry) → PDPT → PD → PT → 4 KB page\n"
+      "    PML4 (512 GB/entry) -> PDPT -> PD -> PT -> 4 KB page\n"
       "  The kernel is loaded at 0xFFFFFFFF80000000 (upper 2 GB).\n"
       "  All physical RAM is accessible via the HHDM offset at\n"
       "  0xFFFF800000000000 (provided by Limine).\n"
@@ -107,9 +103,9 @@ static const kb_entry_t kb[] = {
     { {"pmm","physical memory","bitmap","page","allocation",NULL},
       "\033[96mPhysical Memory Manager (PMM)\033[0m\n"
       "  Algorithm: flat bitmap, 1 bit per 4 KiB page.\n"
-      "  pmm_alloc()   — allocate one zeroed 4 KiB page\n"
-      "  pmm_alloc_n() — allocate N contiguous pages\n"
-      "  pmm_free()    — return a page to the free pool\n"
+      "  pmm_alloc()   -- allocate one zeroed 4 KiB page\n"
+      "  pmm_alloc_n() -- allocate N contiguous pages\n"
+      "  pmm_free()    -- return a page to the free pool\n"
       "  Thread-safe via ticket spinlock.\n"
       "  Use: \033[93mmem\033[0m command to see current usage.\n"
     },
@@ -117,7 +113,7 @@ static const kb_entry_t kb[] = {
     { {"heap","kmalloc","kfree","slab","allocator",NULL},
       "\033[96mKernel Heap Allocator\033[0m\n"
       "  Two-tier design:\n"
-      "  1. \033[93mSlab caches\033[0m for sizes 8–2048 bytes (9 caches total).\n"
+      "  1. \033[93mSlab caches\033[0m for sizes 8-2048 bytes (9 caches total).\n"
       "     Each slab is one 4 KiB page carved into equal-size objects.\n"
       "  2. \033[93mLarge allocations\033[0m use PMM directly (>2048 bytes).\n"
       "  Every allocation has a 16-byte header with a magic cookie\n"
@@ -139,9 +135,9 @@ static const kb_entry_t kb[] = {
       "\033[96mVirtual File System (VFS)\033[0m\n"
       "  An abstraction layer allowing multiple FS implementations.\n"
       "  Current filesystems:\n"
-      "  • \033[93mRamFS\033[0m — in-memory FS backed by kmalloc.\n"
+      "  * \033[93mRamFS\033[0m -- in-memory FS backed by kmalloc.\n"
       "      Supports files, directories, read/write/create/stat.\n"
-      "  • \033[93mDevFS\033[0m — /dev character devices.\n"
+      "  * \033[93mDevFS\033[0m -- /dev character devices.\n"
       "      /dev/null (discard) and /dev/zero (zero bytes).\n"
       "  Use: \033[93mls /\033[0m, \033[93mcat\033[0m, \033[93mwrite\033[0m, \033[93mstat\033[0m commands.\n"
     },
@@ -162,7 +158,7 @@ static const kb_entry_t kb[] = {
 
     { {"idt","interrupt","exception","fault","isr","irq",NULL},
       "\033[96mInterrupt Descriptor Table (IDT)\033[0m\n"
-      "  256 entries — one for each possible interrupt vector.\n"
+      "  256 entries -- one for each possible interrupt vector.\n"
       "  Vectors 0-31:  CPU exceptions (some push an error code).\n"
       "  Vectors 32+:   Hardware IRQs via APIC / software interrupts.\n"
       "  All 256 stubs are auto-generated by gen_isr_stubs.py and\n"
@@ -174,31 +170,31 @@ static const kb_entry_t kb[] = {
       "\033[96mACPI (Advanced Configuration and Power Interface)\033[0m\n"
       "  Quanta uses ACPI tables found via the RSDP provided by Limine.\n"
       "  Tables parsed:\n"
-      "  • XSDT / RSDT — root table (ACPI 2.0+ / 1.0)\n"
-      "  • MADT ('APIC') — local APIC + I/O APIC IDs for SMP\n"
-      "  • HPET — high-precision event timer (future use)\n"
-      "  • MCFG — PCIe ECAM base addresses for VirtIO enumeration\n"
+      "  * XSDT / RSDT -- root table (ACPI 2.0+ / 1.0)\n"
+      "  * MADT ('APIC') -- local APIC + I/O APIC IDs for SMP\n"
+      "  * HPET -- high-precision event timer (future use)\n"
+      "  * MCFG -- PCIe ECAM base addresses for VirtIO enumeration\n"
     },
 
     { {"limine","bootloader","boot","request",NULL},
-      "\033[96mLibmine Bootloader\033[0m\n"
+      "\033[96mLimine Bootloader\033[0m\n"
       "  Quanta is loaded by Limine v8.7.0 (stable release).\n"
       "  Limine requests used by Quanta:\n"
-      "  • Framebuffer  — pixel-mode display\n"
-      "  • Memory Map   — usable/reserved physical regions\n"
-      "  • HHDM         — virtual offset for all physical RAM\n"
-      "  • Kernel Addr  — physical and virtual kernel load address\n"
-      "  • SMP          — AP descriptors + x2APIC opt-in\n"
-      "  • RSDP         — ACPI root system description pointer\n"
-      "  • Boot Time    — Unix timestamp at boot\n"
+      "  * Framebuffer  -- pixel-mode display\n"
+      "  * Memory Map   -- usable/reserved physical regions\n"
+      "  * HHDM         -- virtual offset for all physical RAM\n"
+      "  * Kernel Addr  -- physical and virtual kernel load address\n"
+      "  * SMP          -- AP descriptors + x2APIC opt-in\n"
+      "  * RSDP         -- ACPI root system description pointer\n"
+      "  * Boot Time    -- Unix timestamp at boot\n"
     },
 
     { {"spinlock","lock","mutex","synchronisation","atomic",NULL},
       "\033[96mSynchronisation Primitives\033[0m\n"
-      "  Quanta uses \033[93mticket spinlocks\033[0m — fair FIFO ordering.\n"
-      "  spinlock_acquire()        — spin until lock acquired\n"
-      "  spinlock_irq_acquire()    — also disables interrupts (for ISRs)\n"
-      "  spinlock_irq_release()    — re-enables interrupts if they were on\n"
+      "  Quanta uses \033[93mticket spinlocks\033[0m -- fair FIFO ordering.\n"
+      "  spinlock_acquire()        -- spin until lock acquired\n"
+      "  spinlock_irq_acquire()    -- also disables interrupts (for ISRs)\n"
+      "  spinlock_irq_release()    -- re-enables interrupts if they were on\n"
       "  All PMM, heap, VFS, and scheduler operations use spinlocks.\n"
     },
 
@@ -221,28 +217,28 @@ static const kb_entry_t kb[] = {
     { {"framebuffer","display","screen","font","terminal",NULL},
       "\033[96mFramebuffer Terminal\033[0m\n"
       "  Pixel-mode terminal drawn into the Limine framebuffer.\n"
-      "  Uses an embedded 8×16 IBM VGA-style bitmap font.\n"
+      "  Uses an embedded 8x16 IBM VGA-style bitmap font.\n"
       "  Supports scrolling, 32-bit XRGB colour, and ANSI escape codes\n"
-      "  (via the kprintf %s formatter — ANSI filtered in fb_putchar).\n"
+      "  (via the kprintf %s formatter -- ANSI filtered in fb_putchar).\n"
     },
 
     { {"help","command","commands","what can","list",NULL},
       "Type \033[96mhelp\033[0m to see all built-in commands.\n"
       "Some highlights:\n"
-      "  \033[93mls\033[0m, \033[93mcat\033[0m, \033[93mwrite\033[0m, \033[93mstat\033[0m  — filesystem\n"
-      "  \033[93mmem\033[0m, \033[93mcpuinfo\033[0m, \033[93muptime\033[0m  — system info\n"
-      "  \033[93mtasks\033[0m, \033[93msleep\033[0m          — scheduler\n"
-      "  \033[93mdisk\033[0m                   — VirtIO block device\n"
-      "  \033[93mai <question>\033[0m          — this assistant\n"
+      "  \033[93mls\033[0m, \033[93mcat\033[0m, \033[93mwrite\033[0m, \033[93mstat\033[0m  -- filesystem\n"
+      "  \033[93mmem\033[0m, \033[93mcpuinfo\033[0m, \033[93muptime\033[0m  -- system info\n"
+      "  \033[93mtasks\033[0m, \033[93msleep\033[0m          -- scheduler\n"
+      "  \033[93mdisk\033[0m                   -- VirtIO block device\n"
+      "  \033[93mai <question>\033[0m          -- this assistant\n"
     },
 
     { {"efer","msr","nx","no-execute","sce","syscall",NULL},
       "\033[96mModel Specific Registers (MSRs)\033[0m\n"
       "  Quanta uses MSRs for:\n"
-      "  • EFER (0xC0000080) — enables NX (no-execute) and SCE (syscall)\n"
-      "  • APIC_BASE (0x1B) — LAPIC base address + x2APIC enable bit\n"
-      "  • GS_BASE (0xC0000101) — per-CPU local data pointer\n"
-      "  • x2APIC registers (0x800–0x83F) — fast LAPIC access via MSR\n"
+      "  * EFER (0xC0000080) -- enables NX (no-execute) and SCE (syscall)\n"
+      "  * APIC_BASE (0x1B) -- LAPIC base address + x2APIC enable bit\n"
+      "  * GS_BASE (0xC0000101) -- per-CPU local data pointer\n"
+      "  * x2APIC registers (0x800-0x83F) -- fast LAPIC access via MSR\n"
     },
 
     // Catch-all
@@ -256,11 +252,9 @@ static const kb_entry_t kb[] = {
 
 #define KB_COUNT  ((int)(sizeof(kb)/sizeof(kb[0])))
 
-// ── qai_answer ────────────────────────────────────────────────────────────
 void qai_answer(const char *question) {
-    // Score each entry by counting keyword hits
     int best_score = -1;
-    int best_idx   = KB_COUNT - 1;   // default = catch-all
+    int best_idx   = KB_COUNT - 1;
 
     for (int i = 0; i < KB_COUNT - 1; i++) {
         int score = 0;
@@ -276,9 +270,7 @@ void qai_answer(const char *question) {
 
     shell_print("\n" ANSI_MAGENTA "[QAI] " ANSI_RESET);
 
-    // Enrich responses that reference live system data
     if (best_idx >= 0 && best_score > 0) {
-        // Prepend live context for certain topics
         const char *kw0 = kb[best_idx].keywords[0];
         if (kw0 && (ci_contains(kw0, "pmm") || ci_contains(question, "memory"))) {
             pmm_stats();
@@ -286,7 +278,7 @@ void qai_answer(const char *question) {
         }
         if (kw0 && ci_contains(question, "uptime")) {
             uint64_t ms = sched_uptime_ms();
-            shell_print("Current uptime: %llu ms\n", (unsigned long long)ms);
+            shell_print("Current uptime: %llu ms\n\n", (unsigned long long)ms);
         }
         if (ci_contains(question, "cpu") || ci_contains(question, "processor")) {
             char vendor[13]; cpu_vendor(vendor);
