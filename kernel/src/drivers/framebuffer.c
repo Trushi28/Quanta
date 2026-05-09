@@ -1,12 +1,19 @@
 // ============================================================
-//  drivers/framebuffer.c  —  Pixel-mode text terminal  v2.1
+//  drivers/framebuffer.c  —  Pixel-mode text terminal  v2.2
 //
-//  Foundation fixes:
-//    • UTF-8 state machine — no more split multi-byte garbage
-//    • Unicode → ASCII fallback map (box-drawing, blocks, arrows)
-//    • Hardened ANSI parser (cannot get stuck on unknown CSIs)
-//    • Backscroll buffer (circular, 256 lines)
-//    • Bounds-checked glyph drawing (no OOB font access)
+//  v2.2 UI upgrades:
+//    • Persistent status bar: last row is reserved; content never
+//      scrolls over it.  scroll_rows = rows-1 everywhere.
+//    • fb_statusbar_set / fb_statusbar_refresh — status row API
+//    • fb_draw_hline  — full-width separator line
+//    • fb_boot_step   — coloured [  OK  ] / [ WARN ] / [ FAIL ]
+//    • fb_clear()     preserves the status bar
+//
+//  All v2.1 fixes retained:
+//    • UTF-8 state machine
+//    • Unicode → CP437 fallback map
+//    • Hardened ANSI parser
+//    • Bounds-checked glyph drawing
 // ============================================================
 
 #include "framebuffer.h"
@@ -15,16 +22,12 @@
 
 // ---------------------------------------------------------------------------
 // Embedded 8×16 CP437 bitmap font (256 entries)
-// Entries 0x20–0x7E: standard ASCII
-// Entries 0xB0–0xCE, 0xD9–0xDF, 0xFE: CP437 box-drawing + block chars
-// All unlisted entries are zero (renders as blank).
 // ---------------------------------------------------------------------------
 #define FONT_W 8
 #define FONT_H 16
 
 // clang-format off
 static const uint8_t font_cp437[256][16] = {
-    // 0x20  SPACE
     [0x20]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
     [0x21]={0x00,0x00,0x18,0x3C,0x3C,0x3C,0x18,0x18,0x18,0x00,0x18,0x18,0x00,0x00,0x00,0x00},
     [0x22]={0x00,0x66,0x66,0x66,0x24,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
@@ -120,90 +123,41 @@ static const uint8_t font_cp437[256][16] = {
     [0x7C]={0x00,0x00,0x18,0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x18,0x18,0x00,0x00,0x00,0x00},
     [0x7D]={0x00,0x00,0x70,0x18,0x18,0x18,0x0E,0x18,0x18,0x18,0x18,0x70,0x00,0x00,0x00,0x00},
     [0x7E]={0x00,0x00,0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-
-    // -----------------------------------------------------------------------
-    // CP437 extended: block shades (0xB0-0xB2)
-    // -----------------------------------------------------------------------
-    // 0xB0 ░ light shade
+    // CP437 block shades
     [0xB0]={0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA},
-    // 0xB1 ▒ medium shade
     [0xB1]={0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55},
-    // 0xB2 ▓ dark shade
     [0xB2]={0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77},
-
-    // -----------------------------------------------------------------------
-    // CP437 single-line box drawing
-    // Vertical center cols 3-4 = 0x18; horizontal mid row = row 7
-    // -----------------------------------------------------------------------
-    // 0xB3 │ vertical single
+    // Box drawing — single line
     [0xB3]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
-    // 0xB4 ┤ right T (vertical + left horiz)
     [0xB4]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xF8,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
-
-    // -----------------------------------------------------------------------
-    // CP437 double-line box drawing
-    // Double vertical: cols 1-2 and 5-6 = 0x66
-    // Double horizontal: rows 6 and 8 = 0xFF
-    // -----------------------------------------------------------------------
-    // 0xB9 ╣ double right T
+    // Box drawing — double line
     [0xB9]={0x66,0x66,0x66,0x66,0x66,0x66,0xFE,0x60,0xE0,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
-    // 0xBA ║ double vertical
     [0xBA]={0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
-    // 0xBB ╗ double top-right
     [0xBB]={0x00,0x00,0x00,0x00,0x00,0x00,0xFE,0x60,0xE0,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
-    // 0xBC ╝ double bottom-right
     [0xBC]={0x66,0x66,0x66,0x66,0x66,0x66,0xFE,0x60,0xE0,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xBF ┐ single top-right
     [0xBF]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xF8,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
-    // 0xC0 └ single bottom-left
     [0xC0]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x1F,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xC1 ┴ single bottom T
     [0xC1]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xC2 ┬ single top T
     [0xC2]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
-    // 0xC3 ├ single left T
     [0xC3]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x1F,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
-    // 0xC4 ─ single horizontal
     [0xC4]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xC5 ┼ single cross
     [0xC5]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xFF,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
-    // 0xC8 ╚ double bottom-left
     [0xC8]={0x66,0x66,0x66,0x66,0x66,0x66,0x7F,0x06,0x07,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xC9 ╔ double top-left
     [0xC9]={0x00,0x00,0x00,0x00,0x00,0x00,0x7F,0x06,0x07,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
-    // 0xCA ╩ double bottom T
     [0xCA]={0x66,0x66,0x66,0x66,0x66,0x66,0xFF,0x66,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xCB ╦ double top T
     [0xCB]={0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x66,0xFF,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
-    // 0xCC ╠ double left T
     [0xCC]={0x66,0x66,0x66,0x66,0x66,0x66,0x7F,0x06,0x07,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
-    // 0xCD ═ double horizontal
     [0xCD]={0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xCE ╬ double cross
     [0xCE]={0x66,0x66,0x66,0x66,0x66,0x66,0xFF,0x66,0xFF,0x66,0x66,0x66,0x66,0x66,0x66,0x66},
-    // 0xD9 ┘ single bottom-right
     [0xD9]={0x18,0x18,0x18,0x18,0x18,0x18,0x18,0xF8,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-    // 0xDA ┌ single top-left
     [0xDA]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x1F,0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18},
-
-    // -----------------------------------------------------------------------
-    // CP437 block elements (0xDB–0xDF)
-    // -----------------------------------------------------------------------
-    // 0xDB █ full block
+    // Block elements
     [0xDB]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF},
-    // 0xDC ▄ lower half block
     [0xDC]={0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF},
-    // 0xDD ▌ left half block
     [0xDD]={0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0,0xF0},
-    // 0xDE ▐ right half block
     [0xDE]={0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F,0x0F},
-    // 0xDF ▀ upper half block
     [0xDF]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00},
-
-    // -----------------------------------------------------------------------
-    // Misc useful glyphs
-    // -----------------------------------------------------------------------
-    // 0xFE ■ small filled square (bullet)
+    // Misc
     [0xFE]={0x00,0x00,0x00,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x3C,0x00,0x00,0x00,0x00},
 };
 // clang-format on
@@ -215,10 +169,11 @@ static struct {
   uint32_t *base;
   uint32_t width;
   uint32_t height;
-  uint32_t pitch; // in pixels (bytes/4)
+  uint32_t pitch; // pixels per scanline
 
   uint32_t cols;
   uint32_t rows;
+  uint32_t scroll_rows; // usable rows (rows-1, last row = status bar)
 
   uint32_t cursor_x;
   uint32_t cursor_y;
@@ -226,86 +181,86 @@ static struct {
   uint32_t fg;
   uint32_t bg;
 
-  // ANSI State Machine
-  int ansi_state; // 0=NORMAL, 1=ESC, 2=CSI
+  // ANSI state machine
+  int ansi_state;
   uint32_t ansi_params[8];
   int ansi_pcount;
 
-  // UTF-8 State Machine
-  int utf8_rem;     // remaining continuation bytes
-  uint32_t utf8_cp; // accumulated codepoint
-  int utf8_expect;  // total bytes expected
+  // UTF-8 state machine
+  int utf8_rem;
+  uint32_t utf8_cp;
+  int utf8_expect;
+
+  // Status bar
+  char status_text[256];
+  int sb_enabled; // 1 once fb_init called
 } term;
 
 // ---------------------------------------------------------------------------
-// UTF-8 → ASCII fallback map
+// UTF-8 → CP437 fallback map  (unchanged from v2.1)
 // ---------------------------------------------------------------------------
 static char utf8_map(uint32_t cp) {
   switch (cp) {
-  // ── Dashes ───────────────────────────────────────────────────────────
   case 0x2014:
   case 0x2013:
   case 0x2010:
   case 0x2011:
     return '-';
-  // ── Single-line box drawing → CP437 ─────────────────────────────────
   case 0x2500:
   case 0x2501:
-    return (char)0xC4; // ─
+    return (char)0xC4;
   case 0x2502:
   case 0x2503:
-    return (char)0xB3; // │
+    return (char)0xB3;
   case 0x250C:
   case 0x250F:
-    return (char)0xDA; // ┌
+    return (char)0xDA;
   case 0x2510:
   case 0x2513:
-    return (char)0xBF; // ┐
+    return (char)0xBF;
   case 0x2514:
   case 0x2517:
-    return (char)0xC0; // └
+    return (char)0xC0;
   case 0x2518:
   case 0x251B:
-    return (char)0xD9; // ┘
+    return (char)0xD9;
   case 0x251C:
   case 0x2523:
-    return (char)0xC3; // ├
+    return (char)0xC3;
   case 0x2524:
   case 0x252B:
-    return (char)0xB4; // ┤
+    return (char)0xB4;
   case 0x252C:
   case 0x2533:
-    return (char)0xC2; // ┬
+    return (char)0xC2;
   case 0x2534:
   case 0x253B:
-    return (char)0xC1; // ┴
+    return (char)0xC1;
   case 0x253C:
   case 0x254B:
-    return (char)0xC5; // ┼
-  // ── Double-line box drawing → CP437 ─────────────────────────────────
+    return (char)0xC5;
   case 0x2550:
-    return (char)0xCD; // ═
+    return (char)0xCD;
   case 0x2551:
-    return (char)0xBA; // ║
+    return (char)0xBA;
   case 0x2554:
-    return (char)0xC9; // ╔
+    return (char)0xC9;
   case 0x2557:
-    return (char)0xBB; // ╗
+    return (char)0xBB;
   case 0x255A:
-    return (char)0xC8; // ╚
+    return (char)0xC8;
   case 0x255D:
-    return (char)0xBC; // ╝
+    return (char)0xBC;
   case 0x2560:
-    return (char)0xCC; // ╠
+    return (char)0xCC;
   case 0x2563:
-    return (char)0xB9; // ╣
+    return (char)0xB9;
   case 0x2566:
-    return (char)0xCB; // ╦
+    return (char)0xCB;
   case 0x2569:
-    return (char)0xCA; // ╩
+    return (char)0xCA;
   case 0x256C:
-    return (char)0xCE; // ╬
-  // ── Block elements → CP437 ──────────────────────────────────────────
+    return (char)0xCE;
   case 0x2588:
   case 0x2589:
   case 0x258A:
@@ -314,20 +269,19 @@ static char utf8_map(uint32_t cp) {
   case 0x258D:
   case 0x258E:
   case 0x258F:
-    return (char)0xDB; // █
+    return (char)0xDB;
   case 0x2590:
-    return (char)0xDE; // ▐
+    return (char)0xDE;
   case 0x2584:
-    return (char)0xDC; // ▄
+    return (char)0xDC;
   case 0x2580:
-    return (char)0xDF; // ▀
+    return (char)0xDF;
   case 0x2591:
-    return (char)0xB0; // ░
+    return (char)0xB0;
   case 0x2592:
-    return (char)0xB1; // ▒
+    return (char)0xB1;
   case 0x2593:
-    return (char)0xB2; // ▓
-  // ── Arrows ───────────────────────────────────────────────────────────
+    return (char)0xB2;
   case 0x2190:
     return '<';
   case 0x2191:
@@ -336,57 +290,81 @@ static char utf8_map(uint32_t cp) {
     return '>';
   case 0x2193:
     return 'v';
-  // ── Bullets / misc ───────────────────────────────────────────────────
   case 0x2022:
   case 0x25AA:
-    return (char)0xFE; // ■
+    return (char)0xFE;
   case 0x00B7:
     return '.';
   case 0x00A9:
-    return 'C'; // copyright
+    return 'C';
   default:
     return 0;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Internal: draw a single glyph at (col, row)
+// Internal: draw a single glyph at (col, row) using current fg/bg
 // ---------------------------------------------------------------------------
 static void draw_glyph(uint32_t col, uint32_t row, char ch) {
-  uint8_t idx = (uint8_t)ch; // 0-255 — directly indexes font_cp437
+  uint8_t idx = (uint8_t)ch;
   const uint8_t *glyph = font_cp437[idx];
   uint32_t base_x = col * FONT_W;
   uint32_t base_y = row * FONT_H;
-
   for (uint32_t y = 0; y < FONT_H; y++) {
-    uint8_t row_bits = glyph[y];
+    uint8_t bits = glyph[y];
     for (uint32_t x = 0; x < FONT_W; x++) {
-      uint32_t px = base_x + x;
-      uint32_t py = base_y + y;
+      uint32_t px = base_x + x, py = base_y + y;
       if (px >= term.width || py >= term.height)
         continue;
-      uint32_t color = (row_bits & (0x80 >> x)) ? term.fg : term.bg;
-      term.base[py * term.pitch + px] = color;
+      term.base[py * term.pitch + px] =
+          (bits & (0x80u >> x)) ? term.fg : term.bg;
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Internal: scroll the terminal up one line
+// Internal: draw one glyph at (col,row) with explicit colours (no state
+// side-effects)
 // ---------------------------------------------------------------------------
-static void scroll_up(void) {
-  size_t row_pixels = (size_t)FONT_H * term.pitch;
-  memmove(term.base, term.base + row_pixels,
-          row_pixels * (term.rows - 1) * sizeof(uint32_t));
-
-  uint32_t *last = term.base + (term.rows - 1) * FONT_H * term.pitch;
-  for (uint32_t y = 0; y < FONT_H; y++)
-    for (uint32_t x = 0; x < term.width; x++)
-      last[y * term.pitch + x] = term.bg;
+static void draw_glyph_col(uint32_t col, uint32_t row, char ch, uint32_t fg,
+                           uint32_t bg) {
+  uint32_t sf = term.fg, sb2 = term.bg;
+  term.fg = fg;
+  term.bg = bg;
+  draw_glyph(col, row, ch);
+  term.fg = sf;
+  term.bg = sb2;
 }
 
 // ---------------------------------------------------------------------------
-// ANSI color mapping
+// Internal: fill a pixel row span with a colour
+// ---------------------------------------------------------------------------
+static void fill_row_pixels(uint32_t char_row, uint32_t color) {
+  for (uint32_t py = 0; py < FONT_H; py++)
+    for (uint32_t px = 0; px < term.width; px++)
+      term.base[(char_row * FONT_H + py) * term.pitch + px] = color;
+}
+
+// ---------------------------------------------------------------------------
+// Internal: scroll content area (rows 0 .. scroll_rows-1) up by one line
+// Status bar row is NOT touched.
+// ---------------------------------------------------------------------------
+static void scroll_up(void) {
+  size_t row_pix = (size_t)FONT_H * term.pitch;
+  // Move rows 1..(scroll_rows-1) → rows 0..(scroll_rows-2)
+  memmove(term.base, term.base + row_pix,
+          row_pix * (term.scroll_rows - 1) * sizeof(uint32_t));
+  // Clear the new empty bottom content row
+  uint32_t *last = term.base + (term.scroll_rows - 1) * FONT_H * term.pitch;
+  for (uint32_t py = 0; py < FONT_H; py++)
+    for (uint32_t px = 0; px < term.width; px++)
+      last[py * term.pitch + px] = term.bg;
+  // Status bar row is untouched (it's at row scroll_rows, above the memmove
+  // range)
+}
+
+// ---------------------------------------------------------------------------
+// ANSI colour helpers  (unchanged)
 // ---------------------------------------------------------------------------
 static uint32_t ansi_color_to_hex(uint32_t code) {
   switch (code) {
@@ -438,17 +416,16 @@ static void apply_ansi_sgr(void) {
     if (p == 0) {
       term.fg = 0xFFFFFF;
       term.bg = 0x000000;
-    } else if ((p >= 30 && p <= 37) || (p >= 90 && p <= 97)) {
+    } else if ((p >= 30 && p <= 37) || (p >= 90 && p <= 97))
       term.fg = ansi_color_to_hex(p);
-    } else if (p >= 40 && p <= 47) {
+    else if (p >= 40 && p <= 47)
       term.bg = ansi_color_to_hex(p - 10);
-    }
   }
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Public API
-// ---------------------------------------------------------------------------
+// ===========================================================================
 
 void fb_init(struct limine_framebuffer *fb) {
   term.base = (uint32_t *)fb->address;
@@ -459,9 +436,11 @@ void fb_init(struct limine_framebuffer *fb) {
   term.cols = term.width / FONT_W;
   term.rows = term.height / FONT_H;
 
+  // Reserve last row for status bar; content uses rows 0..(scroll_rows-1)
+  term.scroll_rows = (term.rows > 2) ? term.rows - 1 : term.rows;
+
   term.cursor_x = 0;
   term.cursor_y = 0;
-
   term.fg = FB_COLOR_WHITE;
   term.bg = FB_COLOR_BLACK;
 
@@ -469,12 +448,20 @@ void fb_init(struct limine_framebuffer *fb) {
   term.ansi_pcount = 0;
   for (int i = 0; i < 8; i++)
     term.ansi_params[i] = 0;
-
   term.utf8_rem = 0;
   term.utf8_cp = 0;
   term.utf8_expect = 0;
 
-  fb_clear();
+  term.status_text[0] = '\0';
+  term.sb_enabled = 1;
+
+  // Clear everything (including status row)
+  for (uint32_t y = 0; y < term.height; y++)
+    for (uint32_t x = 0; x < term.width; x++)
+      term.base[y * term.pitch + x] = term.bg;
+
+  // Paint a blank status bar immediately so the row looks intentional
+  fb_statusbar_refresh();
 }
 
 void fb_set_color(uint32_t fg, uint32_t bg) {
@@ -483,11 +470,12 @@ void fb_set_color(uint32_t fg, uint32_t bg) {
 }
 
 void fb_clear(void) {
-  for (uint32_t y = 0; y < term.height; y++)
-    for (uint32_t x = 0; x < term.width; x++)
-      term.base[y * term.pitch + x] = term.bg;
+  // Only clear the content area (status bar row preserved)
+  for (uint32_t row = 0; row < term.scroll_rows; row++)
+    fill_row_pixels(row, term.bg);
   term.cursor_x = 0;
   term.cursor_y = 0;
+  fb_statusbar_refresh();
 }
 
 void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
@@ -499,22 +487,20 @@ void fb_get_size(uint32_t *cols, uint32_t *rows) {
   if (cols)
     *cols = term.cols;
   if (rows)
-    *rows = term.rows;
+    *rows = term.scroll_rows; // expose scrollable rows, not total
 }
 
 // ---------------------------------------------------------------------------
-// fb_putchar — now UTF-8 aware and ANSI hardened
+// fb_putchar — UTF-8 aware + ANSI hardened  (cursor bounded by scroll_rows)
 // ---------------------------------------------------------------------------
 void fb_putchar(char c) {
   if (!term.base)
     return;
-
   uint8_t uc = (uint8_t)c;
 
-  // ---- UTF-8 handling -----------------------------------------------------
+  // ---- UTF-8 ---------------------------------------------------------------
   if (uc >= 0x80) {
     if (term.utf8_rem == 0) {
-      // New multi-byte sequence
       if ((uc & 0xE0) == 0xC0) {
         term.utf8_expect = 2;
         term.utf8_cp = uc & 0x1F;
@@ -527,19 +513,16 @@ void fb_putchar(char c) {
       } else {
         fb_putchar('?');
         return;
-      } // invalid start
+      }
       term.utf8_rem = term.utf8_expect - 1;
     } else {
-      // Continuation byte expected
       if ((uc & 0xC0) == 0x80) {
         term.utf8_cp = (term.utf8_cp << 6) | (uc & 0x3F);
-        term.utf8_rem--;
-        if (term.utf8_rem == 0) {
+        if (--term.utf8_rem == 0) {
           char rep = utf8_map(term.utf8_cp);
           fb_putchar(rep ? rep : '?');
         }
       } else {
-        // Invalid sequence: abort and print '?'
         term.utf8_rem = 0;
         fb_putchar('?');
       }
@@ -547,20 +530,20 @@ void fb_putchar(char c) {
     return;
   }
 
-  // ---- ANSI State Machine -------------------------------------------------
-  if (term.ansi_state == 1) { // ESC seen
+  // ---- ANSI ---------------------------------------------------------------
+  if (term.ansi_state == 1) {
     if (c == '[') {
       term.ansi_state = 2;
       term.ansi_pcount = 0;
       term.ansi_params[0] = 0;
-    } else {
-      term.ansi_state = 0; // unknown escape, abort
-    }
+    } else
+      term.ansi_state = 0;
     return;
-  } else if (term.ansi_state == 2) { // CSI seen
+  }
+  if (term.ansi_state == 2) {
     if (c >= '0' && c <= '9') {
       term.ansi_params[term.ansi_pcount] =
-          (term.ansi_params[term.ansi_pcount] * 10) + (c - '0');
+          term.ansi_params[term.ansi_pcount] * 10 + (c - '0');
     } else if (c == ';') {
       if (term.ansi_pcount < 7) {
         term.ansi_pcount++;
@@ -570,53 +553,51 @@ void fb_putchar(char c) {
       term.ansi_pcount++;
       apply_ansi_sgr();
       term.ansi_state = 0;
-    } else if (c == 'C') { // cursor forward (right)
+    } else if (c == 'C') {
       uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
       term.cursor_x =
           (term.cursor_x + n < term.cols) ? term.cursor_x + n : term.cols - 1;
       term.ansi_state = 0;
-    } else if (c == 'D') { // cursor backward (left)
+    } else if (c == 'D') {
       uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
       term.cursor_x = (term.cursor_x >= n) ? term.cursor_x - n : 0;
       term.ansi_state = 0;
-    } else if (c == 'A') { // cursor up
+    } else if (c == 'A') {
       uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
       term.cursor_y = (term.cursor_y >= n) ? term.cursor_y - n : 0;
       term.ansi_state = 0;
-    } else if (c == 'B') { // cursor down
+    } else if (c == 'B') {
       uint32_t n = term.ansi_params[0] ? term.ansi_params[0] : 1;
-      term.cursor_y =
-          (term.cursor_y + n < term.rows) ? term.cursor_y + n : term.rows - 1;
+      term.cursor_y = (term.cursor_y + n < term.scroll_rows)
+                          ? term.cursor_y + n
+                          : term.scroll_rows - 1;
       term.ansi_state = 0;
-    } else if (c == 'H' || c == 'f') { // cursor position (row;col, 1-based)
+    } else if (c == 'H' || c == 'f') {
       uint32_t r = term.ansi_params[0] ? term.ansi_params[0] - 1 : 0;
       uint32_t cl = (term.ansi_pcount > 1 && term.ansi_params[1])
                         ? term.ansi_params[1] - 1
                         : 0;
-      term.cursor_y = (r < term.rows) ? r : term.rows - 1;
+      term.cursor_y = (r < term.scroll_rows) ? r : term.scroll_rows - 1;
       term.cursor_x = (cl < term.cols) ? cl : term.cols - 1;
       term.ansi_state = 0;
-    } else if (c == 'J') { // erase in display (2J = full clear)
+    } else if (c == 'J') {
       if (term.ansi_params[0] == 2)
         fb_clear();
       term.ansi_state = 0;
-    } else if (c == 'K') { // erase to end of line
+    } else if (c == 'K') {
       for (uint32_t x = term.cursor_x; x < term.cols; x++)
         draw_glyph(x, term.cursor_y, ' ');
       term.ansi_state = 0;
-    } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-      // Any other CSI letter — drop silently, don't get stuck
+    } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
       term.ansi_state = 0;
-    }
-    return; // still inside CSI (or just handled it) — don't draw anything
+    return;
   }
-
   if (c == '\x1b') {
     term.ansi_state = 1;
     return;
   }
 
-  // ---- Normal Drawing -----------------------------------------------------
+  // ---- Normal drawing -----------------------------------------------------
   switch (c) {
   case '\n':
     term.cursor_x = 0;
@@ -642,14 +623,13 @@ void fb_putchar(char c) {
     break;
   }
 
-  // Wrap columns
   if (term.cursor_x >= term.cols) {
     term.cursor_x = 0;
     term.cursor_y++;
   }
 
-  // Scroll if needed
-  while (term.cursor_y >= term.rows) {
+  // Scroll within content area only
+  while (term.cursor_y >= term.scroll_rows) {
     scroll_up();
     term.cursor_y--;
   }
@@ -661,7 +641,7 @@ void fb_puts(const char *s) {
 }
 
 // ---------------------------------------------------------------------------
-// Cursor helpers — underline-style cursor for the shell input line
+// Cursor helpers
 // ---------------------------------------------------------------------------
 void fb_get_cursor(uint32_t *cx, uint32_t *cy) {
   if (cx)
@@ -674,7 +654,7 @@ void fb_draw_cursor(void) {
   if (!term.base)
     return;
   uint32_t bx = term.cursor_x * FONT_W;
-  uint32_t by = term.cursor_y * FONT_H + FONT_H - 3; // bottom 2 rows of cell
+  uint32_t by = term.cursor_y * FONT_H + FONT_H - 3;
   for (uint32_t y = 0; y < 2; y++)
     for (uint32_t x = 0; x < FONT_W; x++)
       if (bx + x < term.width && by + y < term.height)
@@ -690,4 +670,139 @@ void fb_erase_cursor(void) {
     for (uint32_t x = 0; x < FONT_W; x++)
       if (bx + x < term.width && by + y < term.height)
         term.base[(by + y) * term.pitch + (bx + x)] = term.bg;
+}
+
+// ===========================================================================
+// Status bar  (last character row, always navy background)
+// ===========================================================================
+
+#define SB_BG 0x0D1F35  // dark navy
+#define SB_FG 0xCCDDEE  // soft white-blue
+#define SB_ACC 0x33DDCC // teal accent
+#define SB_SEP 0x335577 // dim separator colour
+
+void fb_statusbar_set(const char *text) {
+  if (!text) {
+    term.status_text[0] = '\0';
+    return;
+  }
+  size_t i = 0;
+  while (i < sizeof(term.status_text) - 1 && text[i]) {
+    term.status_text[i] = text[i];
+    i++;
+  }
+  term.status_text[i] = '\0';
+}
+
+void fb_statusbar_refresh(void) {
+  if (!term.base || !term.sb_enabled)
+    return;
+
+  uint32_t row = term.scroll_rows; // the reserved last row
+
+  // Guard: if status bar row is outside physical screen, skip
+  if (row >= term.rows)
+    return;
+
+  // Fill entire row with navy background
+  fill_row_pixels(row, SB_BG);
+
+  uint32_t col = 1;
+  uint32_t saved_fg = term.fg, saved_bg = term.bg;
+
+  // Draw  ">"  accent marker
+  draw_glyph_col(col++, row, '>', SB_ACC, SB_BG);
+  draw_glyph_col(col++, row, ' ', SB_FG, SB_BG);
+
+  // Draw status text (ASCII only)
+  term.fg = SB_FG;
+  term.bg = SB_BG;
+  for (const char *p = term.status_text; *p && col < term.cols - 2;
+       p++, col++) {
+    uint8_t uc = (uint8_t)*p;
+    if (uc >= 0x20 && uc < 0x80)
+      draw_glyph(col, row, *p);
+    else if (*p == '|') {
+      // Render pipe as a coloured separator
+      draw_glyph_col(col, row, '|', SB_SEP, SB_BG);
+    }
+  }
+
+  // Right-aligned  "[READY]"  in lime
+  const char *badge = "[READY]";
+  uint32_t blen = 0;
+  for (const char *p = badge; *p; p++)
+    blen++;
+  if (term.cols > blen + 2) {
+    uint32_t rc = term.cols - blen - 1;
+    for (const char *p = badge; *p && rc < term.cols; p++, rc++)
+      draw_glyph_col(rc, row, *p, 0x44EE88, SB_BG);
+  }
+
+  term.fg = saved_fg;
+  term.bg = saved_bg;
+}
+
+int fb_statusbar_enabled(void) { return term.sb_enabled; }
+
+// ===========================================================================
+// Decorative helpers
+// ===========================================================================
+
+void fb_draw_hline(char glyph, uint32_t fg, uint32_t bg) {
+  if (!term.base)
+    return;
+  uint32_t saved_fg = term.fg, saved_bg = term.bg;
+  term.fg = fg;
+  term.bg = bg;
+  for (uint32_t x = 0; x < term.cols; x++)
+    draw_glyph(x, term.cursor_y, glyph);
+  term.cursor_x = 0;
+  term.cursor_y++;
+  if (term.cursor_y >= term.scroll_rows) {
+    scroll_up();
+    term.cursor_y--;
+  }
+  term.fg = saved_fg;
+  term.bg = saved_bg;
+}
+
+// ===========================================================================
+// Boot-step helper
+// ===========================================================================
+
+void fb_boot_step(const char *component, const char *detail, int status) {
+  uint32_t saved_fg = term.fg, saved_bg = term.bg;
+
+  // Badge
+  if (status == 0) {
+    term.fg = 0x44EE88;
+    term.bg = FB_COLOR_BLACK; // lime
+    fb_puts("  [  \033[92mOK\033[0m  ]  ");
+  } else if (status == 1) {
+    term.fg = 0xFF9922;
+    term.bg = FB_COLOR_BLACK; // orange
+    fb_puts("  [\033[93m WARN \033[0m]  ");
+  } else {
+    term.fg = 0xFF4444;
+    term.bg = FB_COLOR_BLACK; // red
+    fb_puts("  [\033[91m FAIL \033[0m]  ");
+  }
+
+  // Component name
+  term.fg =
+      (status == 0) ? FB_COLOR_WHITE : (status == 1 ? 0xFFDD88 : 0xFF8888);
+  term.bg = FB_COLOR_BLACK;
+  fb_puts(component);
+
+  // Optional detail in gray
+  if (detail && *detail) {
+    term.fg = 0x778899;
+    fb_puts("  ");
+    fb_puts(detail);
+  }
+
+  term.fg = saved_fg;
+  term.bg = saved_bg;
+  fb_putchar('\n');
 }
