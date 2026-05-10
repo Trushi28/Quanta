@@ -1,5 +1,6 @@
 // ============================================================
 //  mm/pmm.c — Bitmap physical memory manager
+//  Phase 3: added pmm_get_stats() for the shell `free` command
 // ============================================================
 #include "pmm.h"
 #include "../lib/kprintf.h"
@@ -11,14 +12,14 @@
 static uint8_t  *bitmap      = NULL;
 static uint64_t  total_pages = 0;
 static uint64_t  free_pages  = 0;
-uint64_t         hhdm_off    = 0;   // also exported as hhdm_off_early
-uint64_t         hhdm_off_early = 0; // set by kmain before pmm_init
+uint64_t         hhdm_off    = 0;
+uint64_t         hhdm_off_early = 0;
 static spinlock_t pmm_lock   = SPINLOCK_INIT;
 
 // ── Bitmap primitives ─────────────────────────────────────────────────────
-static inline void bm_set(uint64_t i)   { bitmap[i/8] |=  (uint8_t)(1u<<(i%8)); }
-static inline void bm_clr(uint64_t i)   { bitmap[i/8] &= (uint8_t)~(1u<<(i%8)); }
-static inline int  bm_tst(uint64_t i)   { return (bitmap[i/8]>>(i%8))&1; }
+static inline void bm_set(uint64_t i) { bitmap[i/8] |=  (uint8_t)(1u<<(i%8)); }
+static inline void bm_clr(uint64_t i) { bitmap[i/8] &= (uint8_t)~(1u<<(i%8)); }
+static inline int  bm_tst(uint64_t i) { return (bitmap[i/8]>>(i%8))&1; }
 
 // ── Address conversion ────────────────────────────────────────────────────
 void *phys_to_virt(uint64_t phys) {
@@ -37,7 +38,6 @@ void pmm_init(uint64_t hhdm_offset) {
     struct limine_memmap_response *mm = limine_memmap();
     if (!mm) kpanic("[PMM] No memory map\n");
 
-    // Pass 1: find highest usable physical address
     uint64_t highest = 0;
     for (uint64_t i = 0; i < mm->entry_count; i++) {
         struct limine_memmap_entry *e = mm->entries[i];
@@ -50,7 +50,6 @@ void pmm_init(uint64_t hhdm_offset) {
     total_pages = highest / PAGE_SIZE;
     uint64_t bm_bytes = (total_pages + 7) / 8;
 
-    // Pass 2: find region for bitmap
     uint64_t bm_phys = 0;
     for (uint64_t i = 0; i < mm->entry_count; i++) {
         struct limine_memmap_entry *e = mm->entries[i];
@@ -62,10 +61,9 @@ void pmm_init(uint64_t hhdm_offset) {
     if (!bm_phys) kpanic("[PMM] No space for bitmap\n");
 
     bitmap = (uint8_t *)phys_to_virt(bm_phys);
-    memset(bitmap, 0xFF, bm_bytes);   // all used
+    memset(bitmap, 0xFF, bm_bytes);
     free_pages = 0;
 
-    // Pass 3: free all usable pages
     for (uint64_t i = 0; i < mm->entry_count; i++) {
         struct limine_memmap_entry *e = mm->entries[i];
         if (e->type != LIMINE_MEMMAP_USABLE) continue;
@@ -77,7 +75,6 @@ void pmm_init(uint64_t hhdm_offset) {
         }
     }
 
-    // Pass 4: re-mark bitmap pages as used
     uint64_t bm_pages = (bm_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
     for (uint64_t j = 0; j < bm_pages; j++) {
         uint64_t idx = (bm_phys / PAGE_SIZE) + j;
@@ -143,9 +140,19 @@ void pmm_free_n(uint64_t phys, size_t n) {
 }
 
 void pmm_stats(void) {
-    uint64_t used  = total_pages - free_pages;
+    uint64_t used = total_pages - free_pages;
     kprintf("[PMM] Total:%llu MiB  Used:%llu MiB  Free:%llu MiB\n",
         (unsigned long long)(total_pages*PAGE_SIZE/(1024*1024)),
         (unsigned long long)(used       *PAGE_SIZE/(1024*1024)),
         (unsigned long long)(free_pages *PAGE_SIZE/(1024*1024)));
+}
+
+// ── pmm_get_stats (Phase 3) ───────────────────────────────────────────────
+// Expose raw page counters so the shell can draw a visual bar
+// without having to parse kprintf output.
+void pmm_get_stats(uint64_t *total_pages_out, uint64_t *free_pages_out) {
+    uint64_t rflags = spinlock_irq_acquire(&pmm_lock);
+    if (total_pages_out) *total_pages_out = total_pages;
+    if (free_pages_out)  *free_pages_out  = free_pages;
+    spinlock_irq_release(&pmm_lock, rflags);
 }

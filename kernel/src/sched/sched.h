@@ -6,74 +6,74 @@
 // ---------------------------------------------------------------------------
 //  sched/sched.h — Preemptive round-robin scheduler
 //
-//  Each CPU runs its own run queue. The APIC timer fires every 1 ms
-//  and calls sched_tick(). Tasks can voluntarily yield via sched_yield().
+//  Phase 3 additions:
+//    • sched_foreach_task() — iterate all tasks (used by `top` command)
+//    • sched_get_tick()     — read the raw ms tick counter
+//    • sched_task_count()   — number of live (non-zombie) tasks
+//    • task_t gains cpu_id  — which CPU last ran this task
 // ---------------------------------------------------------------------------
 
 #define TASK_NAME_MAX  32
 
-// Task states
 typedef enum {
     TASK_RUNNABLE = 0,
     TASK_RUNNING  = 1,
-    TASK_SLEEPING = 2,   // waiting for a wakeup
-    TASK_BLOCKED  = 3,   // waiting for I/O
-    TASK_ZOMBIE   = 4,   // exited, not yet reaped
+    TASK_SLEEPING = 2,
+    TASK_BLOCKED  = 3,
+    TASK_ZOMBIE   = 4,
 } task_state_t;
 
-// Saved register context for context switch
 typedef struct __attribute__((packed)) {
     uint64_t r15, r14, r13, r12, rbx, rbp;
-    uint64_t rip;   // return address (pushed by call to sched_switch)
+    uint64_t rip;
 } task_ctx_t;
 
 typedef struct task {
     list_node_t   list;
-    list_node_t   all_tasks;       // global task list
+    list_node_t   all_tasks;
 
     uint32_t      pid;
-    uint32_t      cpu_affinity;    // 0xFF = any CPU
+    uint32_t      cpu_affinity;   // 0xFF = any CPU
+    uint32_t      last_cpu;       // which CPU last ran this task (NEW)
     task_state_t  state;
     int           exit_code;
 
-    task_ctx_t   *ctx;             // saved context (on the task's stack)
-    uint8_t      *stack;           // kernel stack base
+    task_ctx_t   *ctx;
+    uint8_t      *stack;
     size_t        stack_size;
 
-    uint64_t      ticks_total;     // total ticks consumed
-    uint64_t      wake_tick;       // tick to wake up (if SLEEPING)
+    uint64_t      ticks_total;    // total 1ms ticks consumed
+    uint64_t      wake_tick;      // tick to wake up (if SLEEPING)
 
     char          name[TASK_NAME_MAX];
 } task_t;
 
 typedef void (*task_fn_t)(void *arg);
 
-// Initialise the scheduler (creates the idle task).
-void sched_init(void);
-
-// Create a new kernel task. Returns NULL on OOM.
+// ── Lifecycle ──────────────────────────────────────────────────────────────
+void    sched_init(void);
 task_t *task_create(const char *name, task_fn_t fn, void *arg, size_t stack_sz);
+void    sched_add(task_t *task);
 
-// Make a task runnable (called after task_create, or to wake it).
-void sched_add(task_t *task);
-
-// Called from the APIC timer IRQ handler — may switch tasks.
-void sched_tick(void);
-
-// Voluntarily surrender this CPU's timeslice.
-void sched_yield(void);
-
-// Put the current task to sleep for `ms` milliseconds.
-void sched_sleep_ms(uint64_t ms);
-
-// Exit the current task (does not return).
+// ── Scheduling ────────────────────────────────────────────────────────────
+void     sched_tick(void);
+void     sched_yield(void);
+void     sched_sleep_ms(uint64_t ms);
 __attribute__((noreturn)) void sched_exit(int code);
 
-// Return a pointer to the currently running task on this CPU.
-task_t *sched_current(void);
-
-// Total kernel uptime in milliseconds.
+// ── Queries ───────────────────────────────────────────────────────────────
+task_t  *sched_current(void);
 uint64_t sched_uptime_ms(void);
+uint64_t sched_get_tick(void);       // same as uptime_ms; alias for clarity
+uint32_t sched_task_count(void);     // live (non-zombie) task count
 
-// Low-level context switch (in sched_asm.S)
+// ── Iteration (holds sched lock for duration of callback) ─────────────────
+//
+//  IMPORTANT: do NOT call any scheduler functions (yield, sleep, etc.)
+//  from inside the callback — the lock is already held.
+//
+typedef void (*task_iter_fn)(const task_t *t, void *ud);
+void sched_foreach_task(task_iter_fn fn, void *ud);
+
+// ── Context switch (in sched_asm.S) ──────────────────────────────────────
 extern void sched_switch(task_ctx_t **old_ctx, task_ctx_t *new_ctx);
