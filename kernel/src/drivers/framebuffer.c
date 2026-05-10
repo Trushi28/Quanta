@@ -1,28 +1,10 @@
-// ============================================================
-//  drivers/framebuffer.c  —  Pixel-mode text terminal  v2.3
-//
-//  v2.3 additions:
-//    • Full-screen boot splash with starfield background,
-//      pixel-drawn gradient banner, centered ASCII logo,
-//      animated progress bar, step label
-//    • fb_print_at()  — absolute positioned write, no cursor move
-//    • fb_set_cursor() — jump cursor to any cell
-//    • Splash suppresses fb_putchar / fb_draw_hline so kprintf
-//      during boot goes to serial only (clean splash on screen)
-//    • fb_splash_done() clears to black and resumes normal output
-//
-//  v2.2 features retained:
-//    • Status bar (last row, navy, never scrolled over)
-//    • fb_draw_hline, fb_boot_step
-//    • UTF-8 decoder, ANSI parser, CP437 font
-// ============================================================
 
 #include "framebuffer.h"
 #include "../lib/string.h"
 #include <stddef.h>
 
 // ---------------------------------------------------------------------------
-// Font — 8x16 CP437 bitmap
+// Font — 8×16 CP437 bitmap  (identical to v2.2)
 // ---------------------------------------------------------------------------
 #define FONT_W 8
 #define FONT_H 16
@@ -41,7 +23,7 @@ static const uint8_t font_cp437[256][16] = {
     [0x29]={0,0,0x30,0x18,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x18,0x30,0,0,0,0},
     [0x2A]={0,0,0,0,0,0x66,0x3C,0xFF,0x3C,0x66,0,0,0,0,0,0},
     [0x2B]={0,0,0,0x18,0x18,0x18,0xFF,0x18,0x18,0x18,0,0,0,0,0,0},
-    [0x2C]={0,0,0,0,0,0,0,0,0,0x18,0x18,0x30,0,0,0,0},
+    [0x2C]={0,0,0,0,0,0,0,0,0,0,0x18,0x18,0x30,0,0,0},
     [0x2D]={0,0,0,0,0,0,0xFF,0,0,0,0,0,0,0,0,0},
     [0x2E]={0,0,0,0,0,0,0,0,0,0,0x18,0x18,0,0,0,0},
     [0x2F]={0,0,0,0,0x06,0x0C,0x18,0x30,0x60,0xC0,0x80,0,0,0,0,0},
@@ -124,7 +106,6 @@ static const uint8_t font_cp437[256][16] = {
     [0x7C]={0,0,0x18,0x18,0x18,0x18,0,0x18,0x18,0x18,0x18,0x18,0,0,0,0},
     [0x7D]={0,0,0x70,0x18,0x18,0x18,0x0E,0x18,0x18,0x18,0x18,0x70,0,0,0,0},
     [0x7E]={0,0,0x76,0xDC,0,0,0,0,0,0,0,0,0,0,0,0},
-    // Block / box
     [0xB0]={0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA},
     [0xB1]={0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55,0xAA,0x55},
     [0xB2]={0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77},
@@ -159,22 +140,26 @@ static const uint8_t font_cp437[256][16] = {
 };
 // clang-format on
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // Terminal state
-// ---------------------------------------------------------------------------
+// ===========================================================================
 static struct {
-  uint32_t *base;
-  uint32_t width, height, pitch;
-  uint32_t cols, rows, scroll_rows;
+  uint32_t *base; // real framebuffer (GOP)
+  uint32_t width, height;
+  uint32_t pitch; // uint32_t pixels per scanline
+
+  uint32_t cols, rows;
+  uint32_t scroll_rows; // rows - 1 (last row = status bar)
+
   uint32_t cursor_x, cursor_y;
   uint32_t fg, bg;
 
-  // ANSI
+  // ANSI state machine
   int ansi_state;
   uint32_t ansi_params[8];
   int ansi_pcount;
 
-  // UTF-8
+  // UTF-8 state machine
   int utf8_rem, utf8_expect;
   uint32_t utf8_cp;
 
@@ -185,52 +170,130 @@ static struct {
   // Splash
   int splash_active;
 
-  // Splash layout cache (set by fb_splash_draw)
-  uint32_t sp_bar_col;   // leftmost col of progress bar
-  uint32_t sp_bar_row;   // row of progress bar
-  uint32_t sp_bar_width; // width in cols
-  uint32_t sp_label_row; // row for step label text
+  // Double-buffer for splash (NULL until fb_splash_set_backbuf is called)
+  uint32_t *backbuf;
+
+  // Splash layout (set once in fb_splash_draw)
+  uint32_t sp_bar_pixel_x;
+  uint32_t sp_bar_pixel_y;
+  uint32_t sp_bar_w_px;
+  uint32_t sp_bar_h_px;
+  uint32_t sp_label_row; // character row for step label
 } term;
 
-// ---------------------------------------------------------------------------
-// Raw pixel helpers
-// ---------------------------------------------------------------------------
-static inline void put_pixel(uint32_t x, uint32_t y, uint32_t c) {
-  if (x < term.width && y < term.height)
-    term.base[y * term.pitch + x] = c;
+// ===========================================================================
+// Fast primitives  (rep stosl / rep movsl)
+// ===========================================================================
+
+// Fill `count` uint32_t values at dst with val.
+// Uses rep stosl — equivalent to a hand-unrolled memset but in one instruction.
+static void fast_fill32(uint32_t *dst, uint32_t val, size_t count) {
+  __asm__ volatile("cld\n\t"
+                   "rep stosl\n\t"
+                   : "+D"(dst), "+c"(count)
+                   : "a"(val)
+                   : "memory");
 }
 
+// Copy `count` uint32_t values from src to dst (non-overlapping).
+// Uses rep movsl — equivalent to memcpy but in one instruction.
+static void fast_copy32(uint32_t *dst, const uint32_t *src, size_t count) {
+  __asm__ volatile("cld\n\t"
+                   "rep movsl\n\t"
+                   : "+D"(dst), "+S"(src), "+c"(count)
+                   :
+                   : "memory");
+}
+
+// ===========================================================================
+// TSC-based timing
+// ===========================================================================
+
+static inline uint64_t fb_rdtsc(void) {
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+}
+
+// Spin for at least `ms` milliseconds.
+// Assumes TSC frequency >= 1 GHz (conservative — all x86_64 CPUs since ~2005).
+// At 1 GHz: 1 ms = 1,000,000 ticks.  At 3 GHz it will be 3× shorter than
+// requested, but the fade animation still looks good at 3× speed.
+// Worst-case overrun: none — we always spin at least the requested time.
+static void fb_spin_ms(uint32_t ms) {
+  uint64_t start = fb_rdtsc();
+  uint64_t target = start + (uint64_t)ms * 1000000ULL;
+  while (fb_rdtsc() < target)
+    __asm__ volatile("pause");
+}
+
+// ===========================================================================
+// Pixel / rect helpers
+// ===========================================================================
+
+// Choose write target: back buffer if available during splash, else real FB.
+static inline uint32_t *splash_target(void) {
+  return (term.splash_active && term.backbuf) ? term.backbuf : term.base;
+}
+
+static inline void put_pixel(uint32_t x, uint32_t y, uint32_t c) {
+  uint32_t *dst = splash_target();
+  if (x < term.width && y < term.height)
+    dst[y * term.pitch + x] = c;
+}
+
+// Fill a rectangle using fast_fill32 (one rep stosl per scanline).
 static void fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                       uint32_t c) {
-  for (uint32_t py = y; py < y + h && py < term.height; py++)
-    for (uint32_t px = x; px < x + w && px < term.width; px++)
-      term.base[py * term.pitch + px] = c;
+  uint32_t *dst = splash_target();
+  for (uint32_t py = y; py < y + h && py < term.height; py++) {
+    uint32_t len = w;
+    if (x + len > term.width)
+      len = term.width - x;
+    fast_fill32(dst + py * term.pitch + x, c, len);
+  }
 }
 
+// Fill FONT_H pixel rows for one character row.
 static void fill_row_pixels(uint32_t char_row, uint32_t color) {
-  for (uint32_t py = 0; py < FONT_H; py++)
-    for (uint32_t px = 0; px < term.width; px++)
-      term.base[(char_row * FONT_H + py) * term.pitch + px] = color;
+  uint32_t *dst = splash_target();
+  // During normal terminal use, always write to term.base.
+  if (!term.splash_active)
+    dst = term.base;
+  fast_fill32(dst + char_row * FONT_H * term.pitch, color,
+              (size_t)FONT_H * term.pitch);
 }
 
-// ---------------------------------------------------------------------------
-// Colour math helpers
-// ---------------------------------------------------------------------------
-static uint32_t lerp_color(uint32_t a, uint32_t b, uint32_t t, uint32_t tmax) {
-  // Linear interpolate between two RGB colours.  t in [0, tmax].
-  uint32_t ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab2 = a & 0xFF;
-  uint32_t br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb2 = b & 0xFF;
-  uint32_t r = ar + (br - ar) * t / tmax;
-  uint32_t g = ag + (bg - ag) * t / tmax;
-  uint32_t bv = ab2 + (bb2 - ab2) * t / tmax;
-  return (r << 16) | (g << 8) | bv;
+// ===========================================================================
+// Blit back buffer → real framebuffer  (rep movsl)
+// ===========================================================================
+static void fb_flip(void) {
+  if (!term.backbuf)
+    return;
+  fast_copy32(term.base, term.backbuf, (size_t)term.height * term.pitch);
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Scroll (content area only)
+// ===========================================================================
+static void scroll_up(void) {
+  size_t char_row_px = (size_t)FONT_H * term.pitch;
+  // Shift rows 1..scroll_rows-1  →  0..scroll_rows-2  (rep movsl)
+  fast_copy32(term.base, term.base + char_row_px,
+              char_row_px * (term.scroll_rows - 1));
+  // Clear the new bottom content row
+  fast_fill32(term.base + (term.scroll_rows - 1) * char_row_px, term.bg,
+              char_row_px);
+}
+
+// ===========================================================================
 // Glyph drawing
-// ---------------------------------------------------------------------------
+// ===========================================================================
 static void draw_glyph_raw(uint32_t col, uint32_t row, char ch, uint32_t fg,
                            uint32_t bg) {
+  uint32_t *dst = splash_target();
+  if (!term.splash_active)
+    dst = term.base;
   const uint8_t *g = font_cp437[(uint8_t)ch];
   uint32_t bx = col * FONT_W, by = row * FONT_H;
   for (uint32_t y = 0; y < FONT_H; y++) {
@@ -238,7 +301,7 @@ static void draw_glyph_raw(uint32_t col, uint32_t row, char ch, uint32_t fg,
     for (uint32_t x = 0; x < FONT_W; x++) {
       uint32_t px = bx + x, py = by + y;
       if (px < term.width && py < term.height)
-        term.base[py * term.pitch + px] = (bits & (0x80u >> x)) ? fg : bg;
+        dst[py * term.pitch + px] = (bits & (0x80u >> x)) ? fg : bg;
     }
   }
 }
@@ -247,22 +310,9 @@ static void draw_glyph(uint32_t col, uint32_t row, char ch) {
   draw_glyph_raw(col, row, ch, term.fg, term.bg);
 }
 
-// ---------------------------------------------------------------------------
-// Scroll (content area only)
-// ---------------------------------------------------------------------------
-static void scroll_up(void) {
-  size_t row_pix = (size_t)FONT_H * term.pitch;
-  memmove(term.base, term.base + row_pix,
-          row_pix * (term.scroll_rows - 1) * sizeof(uint32_t));
-  uint32_t *last = term.base + (term.scroll_rows - 1) * FONT_H * term.pitch;
-  for (uint32_t py = 0; py < FONT_H; py++)
-    for (uint32_t px = 0; px < term.width; px++)
-      last[py * term.pitch + px] = term.bg;
-}
-
-// ---------------------------------------------------------------------------
-// UTF-8 fallback map
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// UTF-8 → CP437 fallback
+// ===========================================================================
 static char utf8_map(uint32_t cp) {
   switch (cp) {
   case 0x2014:
@@ -366,9 +416,9 @@ static char utf8_map(uint32_t cp) {
   }
 }
 
-// ---------------------------------------------------------------------------
+// ===========================================================================
 // ANSI colour
-// ---------------------------------------------------------------------------
+// ===========================================================================
 static uint32_t ansi_color_to_hex(uint32_t code) {
   switch (code) {
   case 30:
@@ -448,11 +498,9 @@ void fb_init(struct limine_framebuffer *fb) {
   term.status_text[0] = '\0';
   term.sb_enabled = 1;
   term.splash_active = 0;
+  term.backbuf = 0;
 
-  for (uint32_t y = 0; y < term.height; y++)
-    for (uint32_t x = 0; x < term.width; x++)
-      term.base[y * term.pitch + x] = 0;
-
+  fast_fill32(term.base, 0, (size_t)term.height * term.pitch);
   fb_statusbar_refresh();
 }
 
@@ -468,14 +516,19 @@ void fb_set_cursor(uint32_t x, uint32_t y) {
 
 void fb_print_at(uint32_t col, uint32_t row, const char *s, uint32_t fg,
                  uint32_t bg) {
-  while (*s && col < term.cols) {
+  uint32_t *save_bb = term.backbuf;
+  term.backbuf = 0; // print_at always targets term.base
+  int save_splash = term.splash_active;
+  term.splash_active = 0;
+  while (*s && col < term.cols)
     draw_glyph_raw(col++, row, *s++, fg, bg);
-  }
+  term.backbuf = save_bb;
+  term.splash_active = save_splash;
 }
 
 void fb_clear(void) {
-  for (uint32_t row = 0; row < term.scroll_rows; row++)
-    fill_row_pixels(row, term.bg);
+  fast_fill32(term.base, term.bg,
+              (size_t)term.scroll_rows * FONT_H * term.pitch);
   term.cursor_x = term.cursor_y = 0;
   fb_statusbar_refresh();
 }
@@ -499,7 +552,7 @@ void fb_get_cursor(uint32_t *cx, uint32_t *cy) {
 }
 
 // ---------------------------------------------------------------------------
-// fb_putchar — suppressed during splash
+// fb_putchar — suppressed during splash  (goes to serial via kprintf)
 // ---------------------------------------------------------------------------
 void fb_putchar(char c) {
   if (!term.base || term.splash_active)
@@ -605,7 +658,7 @@ void fb_putchar(char c) {
     return;
   }
 
-  // Normal
+  // Normal character
   switch (c) {
   case '\n':
     term.cursor_x = 0;
@@ -695,7 +748,9 @@ void fb_statusbar_refresh(void) {
   if (row >= term.rows)
     return;
 
-  fill_row_pixels(row, SB_BG);
+  // Fast fill the entire status row
+  fast_fill32(term.base + row * FONT_H * term.pitch, SB_BG,
+              (size_t)FONT_H * term.pitch);
 
   uint32_t col = 1;
   draw_glyph_raw(col++, row, '>', SB_ACC, SB_BG);
@@ -727,7 +782,7 @@ int fb_statusbar_enabled(void) { return term.sb_enabled; }
 void fb_draw_hline(char glyph, uint32_t fg, uint32_t bg) {
   if (!term.base || term.splash_active)
     return;
-  uint32_t saved_fg = term.fg, saved_bg = term.bg;
+  uint32_t sf = term.fg, sb2 = term.bg;
   term.fg = fg;
   term.bg = bg;
   for (uint32_t x = 0; x < term.cols; x++)
@@ -738,14 +793,14 @@ void fb_draw_hline(char glyph, uint32_t fg, uint32_t bg) {
     scroll_up();
     term.cursor_y--;
   }
-  term.fg = saved_fg;
-  term.bg = saved_bg;
+  term.fg = sf;
+  term.bg = sb2;
 }
 
 void fb_boot_step(const char *component, const char *detail, int status) {
   if (term.splash_active)
     return;
-  uint32_t sf = term.fg, sb = term.bg;
+  uint32_t sf = term.fg, sb2 = term.bg;
   if (status == 0)
     fb_puts("  [  \033[92mOK\033[0m  ]  ");
   else if (status == 1)
@@ -762,7 +817,7 @@ void fb_boot_step(const char *component, const char *detail, int status) {
     fb_puts(detail);
   }
   term.fg = sf;
-  term.bg = sb;
+  term.bg = sb2;
   fb_putchar('\n');
 }
 
@@ -770,23 +825,43 @@ void fb_boot_step(const char *component, const char *detail, int status) {
 // Boot Splash  (v2.3)
 // ===========================================================================
 
+// Provide PMM-allocated back buffer after pmm_init().
+// Call: fb_splash_set_backbuf((uint32_t*)phys_to_virt(pmm_alloc_n(pages)));
+// where pages = (width * height * 4 + PAGE_SIZE - 1) / PAGE_SIZE
+void fb_splash_set_backbuf(uint32_t *buf) {
+  term.backbuf = buf;
+  if (buf) {
+    // Copy current framebuffer to back buffer so early steps
+    // (drawn before back buffer existed) are preserved
+    fast_copy32(buf, term.base, (size_t)term.height * term.pitch);
+  }
+}
+
 // ---------- Pseudo-random star field ----------
-// Simple LCG — deterministic, no stdlib needed.
 static uint32_t lcg_state = 0xDEADBEEF;
 static uint32_t lcg_next(void) {
   lcg_state = lcg_state * 1664525u + 1013904223u;
   return lcg_state;
 }
 
-static void splash_draw_stars(int count) {
+// Linear interpolate two RGB colours
+static uint32_t lerp_color(uint32_t a, uint32_t b, uint32_t t, uint32_t tmax) {
+  if (!tmax)
+    tmax = 1;
+  uint32_t ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab2 = a & 0xFF;
+  uint32_t br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb2 = b & 0xFF;
+  return ((ar + (br - ar) * t / tmax) << 16) |
+         ((ag + (bg - ag) * t / tmax) << 8) | (ab2 + (bb2 - ab2) * t / tmax);
+}
+
+static void splash_stars(void) {
   lcg_state = 0xDEADBEEF;
-  for (int i = 0; i < count; i++) {
+  for (int i = 0; i < 300; i++) {
     uint32_t sx = lcg_next() % term.width;
-    uint32_t sy = lcg_next() % (term.height * 3 / 4); // top 75%
-    uint8_t br = (uint8_t)(lcg_next() % 180 + 50);    // brightness 50-229
+    uint32_t sy = lcg_next() % (term.height * 3 / 4);
+    uint8_t br = (uint8_t)(lcg_next() % 180 + 50);
     uint32_t col2 = ((uint32_t)br << 16) | ((uint32_t)br << 8) | br;
     put_pixel(sx, sy, col2);
-    // occasionally a 2×2 star
     if ((lcg_next() & 0xF) == 0) {
       put_pixel(sx + 1, sy, col2);
       put_pixel(sx, sy + 1, col2);
@@ -795,53 +870,43 @@ static void splash_draw_stars(int count) {
   }
 }
 
-// ---------- Gradient band ----------
-static void splash_draw_gradient(void) {
-  // Vertical gradient from navy-dark at top to slightly lighter at logo band
-  uint32_t top = 0x020D1A;
-  uint32_t bottom = 0x0D1F35;
-  uint32_t gh = term.height;
-  for (uint32_t y = 0; y < gh; y++) {
-    uint32_t c = lerp_color(top, bottom, y, gh);
-    for (uint32_t x = 0; x < term.width; x++)
-      term.base[y * term.pitch + x] = c;
+// ---------- Progress bar (pixel-level, partial update only) ----------
+static void splash_draw_bar(uint32_t filled_px) {
+  uint32_t px = term.sp_bar_pixel_x;
+  uint32_t py = term.sp_bar_pixel_y;
+  uint32_t bw = term.sp_bar_w_px;
+  uint32_t bh = term.sp_bar_h_px;
+
+  uint32_t track = 0x1A3550;
+  uint32_t border = 0x335577;
+
+  // Refill only the interior (avoids redrawing border every step)
+  for (uint32_t y = py + 1; y < py + bh - 1; y++) {
+    // Empty region
+    fill_rect(px + 1, y, bw - 2, 1, track);
+    // Filled region (gradient)
+    for (uint32_t x = px + 1; x < px + 1 + filled_px - 2 && x < px + bw - 1;
+         x++)
+      put_pixel(x, y, lerp_color(0x00D4FF, 0x33FFCC, x - (px + 1), bw));
   }
-}
 
-// ---------- Accent bar above logo ----------
-// A horizontal glowing bar: 3 pixel rows, centred, colour-swept teal→cyan
-static void splash_draw_accentbar(uint32_t center_y) {
-  uint32_t bar_h = 3;
-  uint32_t y0 = (center_y > bar_h + 2) ? center_y - bar_h - 2 : 0;
-  for (uint32_t dy = 0; dy < bar_h; dy++) {
-    uint32_t y = y0 + dy;
-    for (uint32_t x = 0; x < term.width; x++) {
-      uint32_t c = lerp_color(0x008899, 0x33FFEE, x, term.width);
-      // Dim outer rows
-      if (dy == 0 || dy == bar_h - 1) {
-        uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b2 = c & 0xFF;
-        c = ((r / 3) << 16) | ((g / 3) << 8) | (b2 / 3);
-      }
-      put_pixel(x, y, c);
-    }
+  // Border (drawn once here too, cheap)
+  for (uint32_t x = px; x < px + bw; x++) {
+    put_pixel(x, py, border);
+    put_pixel(x, py + bh - 1, border);
   }
+  for (uint32_t y = py; y < py + bh; y++) {
+    put_pixel(px, y, border);
+    put_pixel(px + bw - 1, y, border);
+  }
+  (void)track;
 }
 
-// ---------- Print centred string at pixel row ----------
-static void splash_puts_centered(const char *s, uint32_t pixel_y, uint32_t fg,
-                                 uint32_t bg) {
-  size_t len = 0;
-  for (const char *p = s; *p; p++)
-    len++;
-  uint32_t total_px = (uint32_t)(len * FONT_W);
-  uint32_t x0 = (term.width > total_px) ? (term.width - total_px) / 2 : 0;
-  uint32_t col_start = x0 / FONT_W;
-  uint32_t row = pixel_y / FONT_H;
-  for (size_t i = 0; i < len; i++)
-    draw_glyph_raw(col_start + i, row, s[i], fg, bg);
+static void splash_clear_label(void) {
+  uint32_t py = term.sp_label_row * FONT_H;
+  fill_rect(0, py, term.width, FONT_H * 2, 0x0D1F35);
 }
 
-// ASCII logo lines (5 rows × ~52 chars wide)
 static const char *logo_lines[] = {
     "   ____                    _       __  ____   _____ ",
     "  / __ \\____  ____ _   __(_)___ _/ / / __ \\ / ___/ ",
@@ -851,97 +916,73 @@ static const char *logo_lines[] = {
 };
 #define LOGO_ROWS 5
 
-// ---------- Progress bar (pixel-level) ----------
-// Drawn as a rounded rectangle; filled portion uses teal→cyan gradient.
-static void splash_draw_bar_at(uint32_t px, uint32_t py, uint32_t bar_w_px,
-                               uint32_t bar_h_px, uint32_t filled_px) {
-  uint32_t track_col = 0x1A3550;
-  uint32_t border_col = 0x335577;
-  uint32_t bg_col = 0x0D1F35;
-
-  // Background track
-  fill_rect(px, py, bar_w_px, bar_h_px, track_col);
-
-  // Border (1px)
-  for (uint32_t x = px; x < px + bar_w_px; x++) {
-    put_pixel(x, py, border_col);
-    put_pixel(x, py + bar_h_px - 1, border_col);
-  }
-  for (uint32_t y = py; y < py + bar_h_px; y++) {
-    put_pixel(px, y, border_col);
-    put_pixel(px + bar_w_px - 1, y, border_col);
-  }
-
-  // Fill
-  if (filled_px > 2) {
-    for (uint32_t x = px + 1;
-         x < px + 1 + filled_px - 2 && x < px + bar_w_px - 1; x++) {
-      uint32_t c = lerp_color(0x00D4FF, 0x33FFCC, x - (px + 1), bar_w_px);
-      for (uint32_t y = py + 1; y < py + bar_h_px - 1; y++)
-        put_pixel(x, y, c);
-    }
-  }
-  (void)bg_col;
-}
-
-// ---------- Clear just the label row ----------
-static void splash_clear_label(void) {
-  uint32_t py = term.sp_label_row * FONT_H;
-  fill_rect(0, py, term.width, FONT_H * 2, 0x0D1F35);
-  // Re-scatter any stars we erased (cheap repaint: just solid bg here)
-}
-
 // ===========================================================================
-// fb_splash_draw
+// fb_splash_draw  — called right after fb_init(), before PMM exists
 // ===========================================================================
 void fb_splash_draw(const char *version, const char *arch) {
   if (!term.base)
     return;
   term.splash_active = 1;
+  // backbuf is NULL here (PMM not yet up) — writes go directly to real FB
 
-  // 1. Gradient background
-  splash_draw_gradient();
+  // 1. Vertical gradient background
+  for (uint32_t y = 0; y < term.height; y++) {
+    uint32_t c = lerp_color(0x020D1A, 0x0D1F35, y, term.height);
+    fast_fill32(term.base + y * term.pitch, c, term.width);
+  }
 
   // 2. Star field
-  splash_draw_stars(300);
+  splash_stars();
 
-  // 3. Logo — centred vertically in upper 55% of screen
+  // 3. Logo centred in upper 55% of screen
   uint32_t logo_total_h = LOGO_ROWS * FONT_H;
   uint32_t logo_area_h = term.height * 55 / 100;
   uint32_t logo_y0 =
       (logo_area_h > logo_total_h) ? (logo_area_h - logo_total_h) / 2 : 4;
 
-  // Accent bar above logo
-  splash_draw_accentbar(logo_y0);
+  // Accent bar above logo (teal→cyan sweep, 3px, dimmed outer edges)
+  {
+    uint32_t y0 = (logo_y0 > 5) ? logo_y0 - 5 : 0;
+    for (uint32_t dy = 0; dy < 3; dy++) {
+      uint32_t y = y0 + dy;
+      for (uint32_t x = 0; x < term.width; x++) {
+        uint32_t col2 = lerp_color(0x008899, 0x33FFEE, x, term.width);
+        if (dy == 0 || dy == 2) {
+          uint32_t r = (col2 >> 16) & 0xFF, g = (col2 >> 8) & 0xFF,
+                   b = col2 & 0xFF;
+          col2 = ((r / 3) << 16) | ((g / 3) << 8) | (b / 3);
+        }
+        put_pixel(x, y, col2);
+      }
+    }
+  }
 
-  // Draw each logo line with a colour sweep (cyan→teal→purple)
+  // Logo rows — each with its own colour
   static const uint32_t logo_cols[LOGO_ROWS] = {0x00EEFF, 0x00D4FF, 0x33DDCC,
                                                 0x00B8FF, 0x7799FF};
   for (int li = 0; li < LOGO_ROWS; li++) {
-    uint32_t py = logo_y0 + li * FONT_H;
+    uint32_t py = logo_y0 + (uint32_t)li * FONT_H;
     uint32_t row = py / FONT_H;
-    // Fill row background
-    for (uint32_t px2 = 0; px2 < term.width; px2++)
-      for (uint32_t dy = 0; dy < FONT_H && py + dy < term.height; dy++)
-        term.base[(py + dy) * term.pitch + px2] =
-            lerp_color(0x020D1A, 0x0D1F35, py, term.height);
-
-    // Centred string
+    // Row background
+    uint32_t bg_c = lerp_color(0x020D1A, 0x0D1F35, py, term.height);
+    fast_fill32(term.base + py * term.pitch, bg_c, term.width * FONT_H);
+    // Centred text
     const char *line = logo_lines[li];
     size_t len = 0;
     for (const char *p = line; *p; p++)
       len++;
-    uint32_t total_px = (uint32_t)(len * FONT_W);
     uint32_t col_start =
-        (term.width > total_px) ? (term.width - total_px) / 2 / FONT_W : 0;
+        (term.width > (uint32_t)(len * FONT_W))
+            ? (term.width - (uint32_t)(len * FONT_W)) / 2 / FONT_W
+            : 0;
     for (size_t ci = 0; line[ci]; ci++)
-      draw_glyph_raw(col_start + ci, row, line[ci], logo_cols[li], 0);
+      draw_glyph_raw(col_start + (uint32_t)ci, row, line[ci], logo_cols[li], 0);
   }
 
-  // 4. Tagline
+  // 4. Tagline + feature strip below logo
   uint32_t tag_row = logo_y0 / FONT_H + LOGO_ROWS + 1;
+  uint32_t feat_row = tag_row + 1;
   {
-    // Build "Quanta OS  vX.Y.Z  (arch)"
     static char tagbuf[64];
     const char *pre = "Quanta OS  v";
     size_t i = 0;
@@ -958,64 +999,57 @@ void fb_splash_draw(const char *version, const char *arch) {
     tagbuf[i] = '\0';
     fb_print_at((term.cols - i) / 2, tag_row, tagbuf, 0x778899, 0);
   }
-
-  // 5. Feature strip
-  uint32_t feat_row = tag_row + 1;
   {
-    const char *feats = "x2APIC  |  SMP  |  VirtIO  |  VFS  |  QAI";
+    const char *feats = "x2APIC  |  SMP  |  VirtIO  |  QuantaFS  |  KV  |  QAI";
     size_t len = 0;
     for (const char *p = feats; *p; p++)
       len++;
     uint32_t fc = (term.cols - len) / 2;
-    // Print char by char with colour cycling
-    static const uint32_t fc_cycle[] = {0x33DDCC, 0x778899, 0x33DDCC,
-                                        0x778899, 0x33DDCC, 0x778899,
-                                        0x33DDCC, 0x778899, 0x33DDCC};
+    static const uint32_t fcc[] = {0x33DDCC, 0x778899, 0x33DDCC,
+                                   0x778899, 0x33DDCC, 0x778899,
+                                   0x33DDCC, 0x778899, 0x33DDCC};
     int seg = 0;
     for (const char *p = feats; *p; p++, fc++) {
-      uint32_t c = (*p == '|') ? 0x335577 : fc_cycle[seg % 9];
+      uint32_t col2 = (*p == '|') ? 0x335577 : fcc[seg % 9];
       if (*p == '|')
         seg++;
-      draw_glyph_raw(fc, feat_row, *p, c, 0);
+      draw_glyph_raw(fc, feat_row, *p, col2, 0);
     }
   }
 
-  // 6. Progress bar position  (60% down the screen)
-  uint32_t bar_pixel_y = term.height * 68 / 100;
-  uint32_t bar_h_px = 16;
-  uint32_t bar_w_px = term.width * 60 / 100;
-  uint32_t bar_pixel_x = (term.width - bar_w_px) / 2;
-
-  // Store for updates
-  term.sp_bar_col = bar_pixel_x / FONT_W;
-  term.sp_bar_row = bar_pixel_y / FONT_H;
-  term.sp_bar_width = bar_w_px / FONT_W;
-  term.sp_label_row = term.sp_bar_row + 2;
+  // 5. Progress bar geometry (store for updates)
+  term.sp_bar_pixel_y = term.height * 68 / 100;
+  term.sp_bar_h_px = 16;
+  term.sp_bar_w_px = term.width * 60 / 100;
+  term.sp_bar_pixel_x = (term.width - term.sp_bar_w_px) / 2;
+  term.sp_label_row = term.sp_bar_pixel_y / FONT_H + 2;
 
   // Draw empty bar
-  splash_draw_bar_at(bar_pixel_x, bar_pixel_y, bar_w_px, bar_h_px, 0);
+  splash_draw_bar(0);
 
-  // 7. "Starting..." text above bar
+  // "Starting..." above bar
   {
-    const char *starting = "Starting Quanta OS...";
-    size_t slen = 0;
-    for (const char *p = starting; *p; p++)
-      slen++;
-    uint32_t sc = (term.cols - slen) / 2;
-    fb_print_at(sc, term.sp_bar_row - 1, starting, 0x778899, 0);
+    const char *s = "Starting Quanta OS...";
+    size_t sl = 0;
+    for (const char *p = s; *p; p++)
+      sl++;
+    fb_print_at((term.cols - sl) / 2, term.sp_bar_pixel_y / FONT_H - 1, s,
+                0x778899, 0);
   }
 
-  // 8. Bottom thin accent line
-  uint32_t bottom_y = term.height - FONT_H * 2;
-  for (uint32_t x = 0; x < term.width; x++) {
-    uint32_t c2 = lerp_color(0x33DDCC, 0x0044AA, x, term.width);
-    put_pixel(x, bottom_y, c2);
-    put_pixel(x, bottom_y + 1, lerp_color(c2, 0, 1, 2));
+  // Bottom accent sweep
+  {
+    uint32_t by = term.height - FONT_H * 2;
+    for (uint32_t x = 0; x < term.width; x++) {
+      uint32_t col2 = lerp_color(0x33DDCC, 0x0044AA, x, term.width);
+      put_pixel(x, by, col2);
+      put_pixel(x, by + 1, lerp_color(col2, 0, 1, 2));
+    }
   }
 }
 
 // ===========================================================================
-// fb_splash_progress
+// fb_splash_progress  — call after each init step
 // ===========================================================================
 void fb_splash_progress(int step, int total, const char *label) {
   if (!term.base || !term.splash_active)
@@ -1023,33 +1057,35 @@ void fb_splash_progress(int step, int total, const char *label) {
   if (total <= 0)
     total = 1;
 
-  uint32_t bar_pixel_y = term.height * 68 / 100;
-  uint32_t bar_h_px = 16;
-  uint32_t bar_w_px = term.width * 60 / 100;
-  uint32_t bar_pixel_x = (term.width - bar_w_px) / 2;
-  uint32_t filled_px = (uint32_t)((uint64_t)step * bar_w_px / total);
+  uint32_t filled_px = (uint32_t)((uint64_t)step * term.sp_bar_w_px / total);
+  splash_draw_bar(filled_px);
 
-  splash_draw_bar_at(bar_pixel_x, bar_pixel_y, bar_w_px, bar_h_px, filled_px);
-
-  // Percentage label inside the bar (centred)
-  if (bar_h_px >= FONT_H) {
+  // Percentage text centred inside bar
+  {
     uint32_t pct = (uint32_t)(step * 100 / total);
-    static char pct_buf[8];
-    // Build "XX%" in pct_buf
-    int tens = (int)(pct / 10), units = (int)(pct % 10);
+    char pbuf[5];
     int pi = 0;
-    if (tens)
-      pct_buf[pi++] = '0' + tens;
-    pct_buf[pi++] = '0' + units;
-    pct_buf[pi++] = '%';
-    pct_buf[pi] = '\0';
-    uint32_t pr = bar_pixel_y / FONT_H;
-    uint32_t pc = (term.width / FONT_W) / 2 - 1;
-    for (int k = 0; pct_buf[k]; k++)
-      draw_glyph_raw(pc + k, pr, pct_buf[k], 0xFFFFFF, 0);
+    if (pct >= 100) {
+      pbuf[pi++] = '1';
+      pbuf[pi++] = '0';
+      pbuf[pi++] = '0';
+    } else {
+      if (pct >= 10)
+        pbuf[pi++] = '0' + (char)(pct / 10);
+      pbuf[pi++] = '0' + (char)(pct % 10);
+    }
+    pbuf[pi++] = '%';
+    pbuf[pi] = '\0';
+    uint32_t pr = term.sp_bar_pixel_y / FONT_H;
+    uint32_t pc = term.cols / 2 - 1;
+    // Clear old pct text first
+    for (int k = 0; k < 4; k++)
+      draw_glyph_raw(pc + k, pr, ' ', 0, 0);
+    for (int k = 0; pbuf[k]; k++)
+      draw_glyph_raw(pc + k, pr, pbuf[k], 0xFFFFFF, 0);
   }
 
-  // Step label below bar (centred, clear previous)
+  // Step label below bar
   splash_clear_label();
   if (label && *label) {
     size_t llen = 0;
@@ -1058,42 +1094,52 @@ void fb_splash_progress(int step, int total, const char *label) {
     uint32_t lc = (llen < term.cols) ? (term.cols - llen) / 2 : 0;
     fb_print_at(lc, term.sp_label_row, label, 0xAADDFF, 0);
   }
+
+  // If back buffer is active, blit to screen now.
+  // Without back buffer (early steps), drawing went directly to real FB.
+  if (term.backbuf)
+    fb_flip();
 }
 
 // ===========================================================================
-// fb_splash_done
+// fb_splash_done  — TSC-timed fade + terminal resume
 // ===========================================================================
 void fb_splash_done(void) {
   if (!term.base)
     return;
 
-  // Brief busy-wait "fade" — darken in 8 steps (no timer needed)
-  // We just wipe to black fast enough it looks intentional.
+  // If we had a back buffer, make sure latest frame is on screen
+  if (term.backbuf)
+    fb_flip();
+
+  // Fade: 5 passes, each dims every pixel by 25%.
+  // ~25 ms per step = ~125 ms total fade — visible on any CPU.
+  uint32_t *fb = term.base;
+  size_t n = (size_t)term.height * term.pitch;
+
   for (int step = 4; step >= 0; step--) {
     uint32_t dim = (uint32_t)step;
-    for (uint32_t y = 0; y < term.height; y++)
-      for (uint32_t x = 0; x < term.width; x++) {
-        uint32_t c = term.base[y * term.pitch + x];
-        uint32_t r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
-        r = r * dim / 4;
-        g = g * dim / 4;
-        b = b * dim / 4;
-        term.base[y * term.pitch + x] = (r << 16) | (g << 8) | b;
-      }
-    // Small spin delay (~5ms equivalent at 1 GHz)
-    for (volatile uint64_t d = 0; d < 2000000ULL; d++)
-      __asm__("pause");
+    for (size_t i = 0; i < n; i++) {
+      uint32_t c = fb[i];
+      uint32_t r = ((c >> 16) & 0xFF) * dim / 4;
+      uint32_t g = ((c >> 8) & 0xFF) * dim / 4;
+      uint32_t b = (c & 0xFF) * dim / 4;
+      fb[i] = (r << 16) | (g << 8) | b;
+    }
+    // If we have a back buffer, update it too so it matches
+    if (term.backbuf)
+      fast_copy32(term.backbuf, fb, n);
+    fb_spin_ms(25);
   }
 
-  // Black out completely
-  for (uint32_t y = 0; y < term.height; y++)
-    for (uint32_t x = 0; x < term.width; x++)
-      term.base[y * term.pitch + x] = 0;
+  // Fast clear to black
+  fast_fill32(fb, 0, n);
 
-  // Re-enable normal terminal output
+  // Re-enable terminal
   term.splash_active = 0;
-  term.cursor_x = term.cursor_y = 0;
+  term.backbuf = 0; // release reference (caller frees PMM pages)
+  term.cursor_x = 0;
+  term.cursor_y = 0;
 
-  // Restore status bar
   fb_statusbar_refresh();
 }
