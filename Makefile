@@ -64,8 +64,9 @@ CFLAGS := \
     -mcmodel=kernel                 \
     -I$(KERNEL_DIR)/include         \
     -I$(SRC_DIR)                    \
-    -DQUANTA_VERSION=\"2.0.0\"      \
+    -DQUANTA_VERSION=\"2.5.0\"      \
     -DQUANTA_ARCH=\"x86_64\"        \
+    -DQUANTA_CODENAME=\"Foundation\" \
     -Wa,--noexecstack 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +187,6 @@ QEMU_BASE := \
     -M q35             \
     -m 512M            \
     -smp 4,cores=4     \
-    -no-reboot         \
-    -no-shutdown
 
 .PHONY: run
 run: iso disk

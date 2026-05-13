@@ -1,5 +1,5 @@
 // ============================================================
-//  kmain.c — Quanta OS Kernel Entry Point  v2.3  (Phase 3)
+//  kmain.c — Quanta OS Kernel Entry Point  v2.5  (Foundation)
 //
 //  Boot flow:
 //    fb_init()  →  fb_splash_draw()          splash appears on screen
@@ -9,9 +9,12 @@
 //    Header panel + ready banner painted on clean terminal
 //    Shell task launched
 //
-//  All Phase 3 additions from the uploaded kmain retained:
-//    kv_init(), QuantaFS welcome file, /home/user mkdir,
-//    status bar with kv / new command hints.
+//  v2.5 changes vs v2.0:
+//    • power_init() called immediately after acpi_init() so FADT
+//      reset/shutdown data is available before any driver touches ACPI.
+//    • SPLASH_TOTAL bumped to 17 (one extra step for power init).
+//    • version.h included for centralised QUANTA_VERSION string.
+//    • Status bar text updated to include new commands.
 // ============================================================
 
 #include "acpi/acpi.h"
@@ -23,6 +26,7 @@
 #include "cpu/ioapic.h"
 #include "cpu/isr.h"
 #include "cpu/msr.h"
+#include "cpu/power.h"
 #include "cpu/smp.h"
 #include "drivers/framebuffer.h"
 #include "drivers/keyboard.h"
@@ -37,13 +41,14 @@
 #include "mm/vmm.h"
 #include "sched/sched.h"
 #include "shell/shell.h"
+#include "version.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
-// Total splash progress steps (must match the number of fb_splash_progress
-// calls below so the bar reaches 100% on the last step).
-#define SPLASH_TOTAL 16
+// Total splash progress steps — must match the number of
+// fb_splash_progress() calls below so the bar reaches 100%.
+#define SPLASH_TOTAL 17
 
 // ── APIC timer IRQ → scheduler tick ──────────────────────────────────────
 static void apic_timer_irq(registers_t *r) {
@@ -56,7 +61,7 @@ __attribute__((noreturn)) void kmain(void) {
 
   // ── 1. Serial (must come first — used for early panic output) ─────────
   serial_init();
-  serial_write_str("\r\n[Quanta] serial up\r\n");
+  serial_write_str("\r\n[Quanta v" QUANTA_VERSION "] serial up\r\n");
 
   // ── 2. Limine request verification ────────────────────────────────────
   if (limine_verify_requests() != 0) {
@@ -74,63 +79,64 @@ __attribute__((noreturn)) void kmain(void) {
   fb_splash_draw(QUANTA_VERSION, QUANTA_ARCH);
 
   // ── 4. ACPI ───────────────────────────────────────────────────────────
-  // ACPI must come before PMM because it only needs phys_to_virt() which
-  // uses hhdm_off_early (set directly from the Limine HHDM response).
+  // ACPI must come before PMM — only needs phys_to_virt() via hhdm_off_early.
   extern uint64_t hhdm_off_early;
   hhdm_off_early = limine_hhdm()->offset;
   acpi_init(limine_rsdp()->address);
   fb_splash_progress(1, SPLASH_TOTAL, "ACPI tables parsed");
 
-  // ── 5. GDT ────────────────────────────────────────────────────────────
+  // ── 5. Power management (parses FADT + DSDT _S5_) ─────────────────────
+  // Must be called after acpi_init().  All subsequent reboot/shutdown
+  // calls (including from the shell) will use the data gathered here.
+  power_init();
+  fb_splash_progress(2, SPLASH_TOTAL, "Power management ready (ACPI S5)");
+
+  // ── 6. GDT ────────────────────────────────────────────────────────────
   gdt_init();
-  fb_splash_progress(2, SPLASH_TOTAL, "GDT + TSS loaded");
+  fb_splash_progress(3, SPLASH_TOTAL, "GDT + TSS loaded");
 
-  // ── 6. IDT ────────────────────────────────────────────────────────────
+  // ── 7. IDT ────────────────────────────────────────────────────────────
   idt_init();
-  fb_splash_progress(3, SPLASH_TOTAL, "IDT installed  (256 gates)");
+  fb_splash_progress(4, SPLASH_TOTAL, "IDT installed  (256 gates)");
 
-  // ── 7. PMM ────────────────────────────────────────────────────────────
+  // ── 8. PMM ────────────────────────────────────────────────────────────
   pmm_init(limine_hhdm()->offset);
-  fb_splash_progress(4, SPLASH_TOTAL, "Physical memory manager ready");
+  fb_splash_progress(5, SPLASH_TOTAL, "Physical memory manager ready");
 
   // Enable double buffering now that PMM is up.
-  // Allocate enough pages for one full framebuffer frame.
   {
     size_t bb_bytes = (size_t)fb->width * fb->height * 4;
     size_t bb_pages = (bb_bytes + 4095) / 4096;
     uint64_t bb_phys = pmm_alloc_n(bb_pages);
     if (bb_phys)
       fb_splash_set_backbuf((uint32_t *)phys_to_virt(bb_phys));
-    // If allocation fails (extremely unlikely at this stage), splash
-    // continues without double buffering — no crash.
   }
 
-  // ── 8. VMM ────────────────────────────────────────────────────────────
+  // ── 9. VMM ────────────────────────────────────────────────────────────
   vmm_init();
-  fb_splash_progress(5, SPLASH_TOTAL, "Virtual memory  (PML4, NX+SCE)");
+  fb_splash_progress(6, SPLASH_TOTAL, "Virtual memory  (PML4, NX+SCE)");
 
-  // ── 9. Heap ───────────────────────────────────────────────────────────
+  // ── 10. Heap ──────────────────────────────────────────────────────────
   heap_init();
-  fb_splash_progress(6, SPLASH_TOTAL, "Slab allocator  (9 caches)");
+  fb_splash_progress(7, SPLASH_TOTAL, "Slab allocator  (9 caches)");
 
-  // ── 10. APIC ──────────────────────────────────────────────────────────
+  // ── 11. APIC ──────────────────────────────────────────────────────────
   apic_init();
-  fb_splash_progress(7, SPLASH_TOTAL,
+  fb_splash_progress(8, SPLASH_TOTAL,
                      apic_x2apic_mode() ? "x2APIC local APIC"
                                         : "xAPIC local APIC");
 
-  // ── 11. I/O APIC ──────────────────────────────────────────────────────
+  // ── 12. I/O APIC ──────────────────────────────────────────────────────
   ioapic_init();
-  fb_splash_progress(8, SPLASH_TOTAL,
+  fb_splash_progress(9, SPLASH_TOTAL,
                      ioapic_available() ? "I/O APIC ready"
                                         : "I/O APIC not found");
 
-  // ── 12. SMP ───────────────────────────────────────────────────────────
+  // ── 13. SMP ───────────────────────────────────────────────────────────
   smp_bsp_early_init();
   smp_init();
   {
     uint32_t n = (uint32_t)__atomic_load_n(&g_cpu_count, __ATOMIC_SEQ_CST);
-    // Build "N CPU(s) online" without using the heap
     static char smp_label[32];
     int mi = 0;
     if (n >= 10)
@@ -140,65 +146,67 @@ __attribute__((noreturn)) void kmain(void) {
     for (const char *p = sfx; *p && mi < 30; p++)
       smp_label[mi++] = *p;
     smp_label[mi] = '\0';
-    fb_splash_progress(9, SPLASH_TOTAL, smp_label);
+    fb_splash_progress(10, SPLASH_TOTAL, smp_label);
   }
 
-  // ── 13. APIC timer (PIT-calibrated, Phase 3) ──────────────────────────
+  // ── 14. APIC timer (PIT-calibrated) ───────────────────────────────────
   irq_register_handler(APIC_TIMER_VECTOR - IRQ_BASE, apic_timer_irq);
   apic_timer_init(1);
-  fb_splash_progress(10, SPLASH_TOTAL, "APIC timer  1 ms  (PIT-calibrated)");
+  fb_splash_progress(11, SPLASH_TOTAL, "APIC timer  1 ms  (PIT-calibrated)");
 
-  // ── 14. Scheduler ─────────────────────────────────────────────────────
+  // ── 15. Scheduler ─────────────────────────────────────────────────────
   sched_init();
-  fb_splash_progress(11, SPLASH_TOTAL, "Scheduler  (round-robin, per-CPU)");
+  fb_splash_progress(12, SPLASH_TOTAL, "Scheduler  (round-robin, per-CPU)");
 
-  // ── 15. VFS ───────────────────────────────────────────────────────────
+  // ── 16. VFS ───────────────────────────────────────────────────────────
   vfs_init();
   {
-    // Write welcome file
     int fd = vfs_open("/tmp/welcome.txt", O_WRONLY | O_CREAT);
     if (fd >= 0) {
-      const char *msg = "Welcome to Quanta OS v" QUANTA_VERSION "!\n"
-                        "\n"
-                        "New in Phase 3:\n"
-                        "  mkdir / rm / mv / cp / touch / chmod\n"
-                        "  ls -l  (inode metadata, timestamps, permissions)\n"
-                        "  top    (all tasks with CPU affinity)\n"
-                        "  free   (visual RAM usage bar)\n"
-                        "  hexdump <file>\n"
-                        "  kv set/get/del/list  (persistent key-value store)\n"
-                        "  sleep now shows actual elapsed time\n"
-                        "\n"
-                        "Type 'help' for all commands.\n"
-                        "Type 'ai <topic>' to ask the QAI assistant.\n";
+      const char *msg =
+          "Welcome to Quanta OS v" QUANTA_VERSION " \"" QUANTA_CODENAME "\"!\n"
+          "\n"
+          "What's new in v2.5 (Foundation Hardening):\n"
+          "  shutdown         — ACPI S5 power-off (bare-metal + QEMU)\n"
+          "  reboot           — ACPI reset reg → KBC → CF9 → triple-fault\n"
+          "  edit <file>      — built-in nano-style text editor\n"
+          "  calc <expr>      — infix arithmetic: calc (2+3)*4\n"
+          "  grep [-i] <pat>  — search files with highlighting\n"
+          "  wc <file>        — count lines / words / bytes\n"
+          "  which <cmd>      — check if a command exists\n"
+          "  uname            — OS + arch summary\n"
+          "  motd             — show this message again\n"
+          "  keyboard fix     — sched_yield() replaces hlt in getchar\n"
+          "  PageUp/Down/Del  — new keys supported in editor\n"
+          "\n"
+          "Type 'help' for all commands.  Type 'ai <topic>' to ask QAI.\n";
       vfs_write(fd, msg, strlen(msg));
       vfs_close(fd);
     }
     vfs_mkdir("/home/user", VFS_MODE_DIR);
   }
-  fb_splash_progress(12, SPLASH_TOTAL, "QuantaFS + devfs mounted");
+  fb_splash_progress(13, SPLASH_TOTAL, "QuantaFS + devfs mounted");
 
-  // ── 16. VirtIO ────────────────────────────────────────────────────────
+  // ── 17. VirtIO ────────────────────────────────────────────────────────
   virtio_init();
-  fb_splash_progress(13, SPLASH_TOTAL, "VirtIO block device");
+  fb_splash_progress(14, SPLASH_TOTAL, "VirtIO block device");
 
-  // ── 17. KV persistent store (Phase 3) ─────────────────────────────────
+  // ── 18. KV persistent store ───────────────────────────────────────────
   kv_init();
-  fb_splash_progress(14, SPLASH_TOTAL,
+  fb_splash_progress(15, SPLASH_TOTAL,
                      kv_ready() ? "KV-Store  (sector 2048 ready)"
                                 : "KV-Store  (no disk)");
 
-  // ── 18. Keyboard ──────────────────────────────────────────────────────
+  // ── 19. Keyboard ──────────────────────────────────────────────────────
   keyboard_init();
-  fb_splash_progress(15, SPLASH_TOTAL, "PS/2 keyboard  (IOAPIC IRQ1)");
+  fb_splash_progress(16, SPLASH_TOTAL, "PS/2 keyboard  (IOAPIC IRQ1)");
 
-  // ── 19. Enable interrupts ─────────────────────────────────────────────
+  // ── 20. Enable interrupts ─────────────────────────────────────────────
   __asm__ volatile("sti");
   fb_splash_progress(SPLASH_TOTAL, SPLASH_TOTAL, "System ready");
 
-  // ── Splash done — TSC-timed fade to black ─────────────────────────────
+  // ── Splash fade-out ───────────────────────────────────────────────────
   fb_splash_done();
-  // From here fb_putchar() is live again; all output appears on screen.
 
   // ── Header panel ──────────────────────────────────────────────────────
   fb_set_color(FB_COLOR_BLACK, 0x0D1F35);
@@ -218,14 +226,13 @@ __attribute__((noreturn)) void kmain(void) {
           "\\____/_/ /_/_/ /_/|___/_/\\__,_/_/ /_____/ /____/   \n");
 
   fb_set_color(0xAADDFF, 0x0D1F35);
-  kprintf("  Quanta OS  v%s  (%s)   "
-          "x2APIC | SMP | VirtIO | QuantaFS | KV | QAI\n",
-          QUANTA_VERSION, QUANTA_ARCH);
+  kprintf("  Quanta OS  v%s  \"%s\"  (%s)\n", QUANTA_VERSION, QUANTA_CODENAME,
+          QUANTA_ARCH);
 
   fb_draw_hline((char)0xCD, 0x335577, 0x000000);
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
 
-  // Info block (same as uploaded kmain)
+  // Info block
   fb_set_color(0x778899, FB_COLOR_BLACK);
   if (limine_bootloader_info())
     kprintf("  Bootloader : %s %s\n", limine_bootloader_info()->name,
@@ -258,28 +265,29 @@ __attribute__((noreturn)) void kmain(void) {
   fb_draw_hline('-', 0x335577, FB_COLOR_BLACK);
   kprintf("\n");
 
-  // ── Ready banner (same as uploaded kmain) ──────────────────────────────
+  // ── Ready banner ──────────────────────────────────────────────────────
   fb_draw_hline((char)0xCD, 0x335577, FB_COLOR_BLACK);
   fb_set_color(0x44EE88, FB_COLOR_BLACK);
-  kprintf("  Quanta OS initialised successfully.\n");
+  kprintf("  Quanta OS v%s initialised successfully.\n", QUANTA_VERSION);
   fb_set_color(0x778899, FB_COLOR_BLACK);
 
   uint32_t ncpus = (uint32_t)__atomic_load_n(&g_cpu_count, __ATOMIC_SEQ_CST);
   if (!ncpus)
     ncpus = 1;
-  kprintf("  %u CPU(s)  |  %s  |  QuantaFS  |  %s\n", ncpus,
+  kprintf("  %u CPU(s)  |  %s  |  QuantaFS  |  %s  |  ACPI power\n", ncpus,
           apic_x2apic_mode() ? "x2APIC" : "xAPIC",
-          kv_ready() ? "KV-Store ready" : "KV-Store offline");
+          kv_ready() ? "KV ready" : "KV offline");
+
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
   fb_draw_hline((char)0xCD, 0x335577, FB_COLOR_BLACK);
   kprintf("\n");
 
-  // ── Status bar (same as uploaded kmain) ───────────────────────────────
+  // ── Status bar ────────────────────────────────────────────────────────
   fb_statusbar_set("Quanta OS v" QUANTA_VERSION
-                   "  |  help  top  free  ls -l  kv  hexdump  ai");
+                   "  |  help  edit  calc  grep  wc  shutdown  ai");
   fb_statusbar_refresh();
 
-  // ── 20. Shell task ────────────────────────────────────────────────────
+  // ── Shell task ────────────────────────────────────────────────────────
   task_t *shell_task = task_create("qai-shell", shell_run, NULL, 64 * 1024);
   if (!shell_task)
     kpanic("[INIT] Cannot create shell task\n");
