@@ -1,17 +1,24 @@
 // ============================================================
 //  drivers/keyboard.c — PS/2 Keyboard (IRQ1)
 //
-//  Changes from Phase 2:
-//    • kbd_getchar() now calls sched_yield() instead of hlt.
-//      This lets the scheduler run other tasks while waiting
-//      for input rather than halting the CPU in a user task
-//      context.  The idle task is responsible for hlt.
-//    • Added extended-key support:
-//        Page Up   (0x49) → ESC [ 5 ~
-//        Page Down (0x51) → ESC [ 6 ~
-//        Delete    (0x53) → ESC [ 3 ~
-//        Insert    (0x52) → ESC [ 2 ~
-//      These are used by the built-in editor.
+//  v2.5.1 fix in kbd_getchar():
+//    Changed sched_yield() → sched_sleep_ms(1).
+//
+//    sched_yield() was a tight spin: it re-queued the shell and
+//    immediately picked it again (since shell is the only task),
+//    never letting idle run.  Idle never ran → the suspended timer
+//    ISR stack on idle never unwound → apic_eoi() for the timer
+//    was delayed indefinitely → keyboard IRQ (lower APIC priority
+//    class) remained blocked behind the unacknowledged timer.
+//
+//    sched_sleep_ms(1) properly removes the shell from the run
+//    queue for one 1ms tick.  Idle gets scheduled, the suspended
+//    ISR unwinds, everything comes back clean.  Maximum input
+//    latency: 1ms (imperceptible to users).
+//
+//    The root cause (EOI sent after handler) is also fixed in
+//    isr.c by moving apic_eoi() before the handler call.
+//    Both fixes together make the system robust.
 // ============================================================
 #include "keyboard.h"
 #include "../cpu/apic.h"
@@ -46,7 +53,7 @@ static bool buf_empty(void) { return kbd_head == kbd_tail; }
 static bool buf_push(char c) {
   uint16_t next = (uint16_t)((kbd_head + 1) % BUF_SIZE);
   if (next == kbd_tail)
-    return false;
+    return false; // buffer full — drop
   kbd_buf[kbd_head] = c;
   kbd_head = next;
   return true;
@@ -96,13 +103,13 @@ static bool extended = false;
 #define SC_RIGHT 0x4D
 #define SC_HOME 0x47
 #define SC_END 0x4F
-#define SC_PGUP 0x49 // ← new
-#define SC_PGDN 0x51 // ← new
-#define SC_DEL 0x53  // ← new
-#define SC_INS 0x52  // ← new
+#define SC_PGUP 0x49
+#define SC_PGDN 0x51
+#define SC_DEL 0x53
+#define SC_INS 0x52
 #define SC_RELEASE 0x80
 
-// Push a 4-byte sequence: ESC [ digit ~
+// Push a 4-byte VT sequence: ESC [ digit ~
 static void push_csi4(char digit) {
   buf_push('\033');
   buf_push('[');
@@ -122,7 +129,6 @@ static void kbd_irq_handler(registers_t *r) {
   bool released = (sc & SC_RELEASE) != 0;
   uint8_t key = sc & ~SC_RELEASE;
 
-  // Modifier tracking
   if (key == SC_LSHIFT || key == SC_RSHIFT) {
     shift_held = !released;
     extended = false;
@@ -178,16 +184,16 @@ static void kbd_irq_handler(registers_t *r) {
       break;
     case SC_PGUP:
       push_csi4('5');
-      break; // ESC [ 5 ~
+      break;
     case SC_PGDN:
       push_csi4('6');
-      break; // ESC [ 6 ~
+      break;
     case SC_DEL:
       push_csi4('3');
-      break; // ESC [ 3 ~
+      break;
     case SC_INS:
       push_csi4('2');
-      break; // ESC [ 2 ~
+      break;
     default:
       break;
     }
@@ -201,7 +207,6 @@ static void kbd_irq_handler(registers_t *r) {
   if (!c)
     return;
 
-  // Ctrl key: convert a-z to control codes 1–26
   if (ctrl_held && c >= 'a' && c <= 'z')
     c = (char)(c - 'a' + 1);
   if (ctrl_held && c >= 'A' && c <= 'Z')
@@ -214,9 +219,8 @@ static void kbd_irq_handler(registers_t *r) {
 
 // ── keyboard_init ──────────────────────────────────────────────────────────
 void keyboard_init(void) {
-  // Flush stale PS/2 data
   while (inb(KBD_STATUS) & 0x01)
-    inb(KBD_DATA);
+    inb(KBD_DATA); // flush stale data
 
   irq_register_handler(1, kbd_irq_handler);
 
@@ -232,10 +236,9 @@ void keyboard_init(void) {
   }
 }
 
-// ── kbd_getchar ───────────────────────────────────────────────────────────
+// ── kbd_getchar ────────────────────────────────────────────────────────────
 // Blocks until a character is available.
-// Uses sched_yield() instead of hlt so other tasks can run while we wait.
-// The idle task is responsible for issuing hlt; a regular task must not.
+// Sleeps for 1ms between checks so idle can run and ISR frames unwind.
 char kbd_getchar(void) {
   for (;;) {
     uint64_t rflags = spinlock_irq_acquire(&kbd_lock);
@@ -245,7 +248,7 @@ char kbd_getchar(void) {
       return c;
     }
     spinlock_irq_release(&kbd_lock, rflags);
-    sched_yield(); // cooperate — idle will hlt; we come back on next tick
+    sched_sleep_ms(1); // properly yield for one tick — not a spin
   }
 }
 
