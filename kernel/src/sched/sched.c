@@ -13,11 +13,14 @@
 // ============================================================
 #include "sched.h"
 #include "../cpu/smp.h"
+#include "../cpu/gdt.h"
+#include "../cpu/msr.h"
 #include "../lib/kprintf.h"
 #include "../lib/spinlock.h"
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
+#include "../mm/vmm.h"
 #include <stddef.h>
 
 #define DEFAULT_STACK_SIZE (32 * 1024)
@@ -94,6 +97,68 @@ void sched_add(task_t *t) {
     uint64_t rflags = spinlock_irq_acquire(&sched_lock);
     list_append(&run_queue, &t->list);
     spinlock_irq_release(&sched_lock, rflags);
+}
+
+// ── user_task_trampoline ──────────────────────────────────────────────────
+// First function run by a user-mode task.  Builds an iretq frame on the
+// kernel stack and drops to Ring 3.
+static void user_task_trampoline(void) {
+    task_t *cur = sched_current();
+
+    // Set up KERNEL_GS_BASE for swapgs on syscall entry.
+    // GS_BASE should be 0 (user GS) when we're in Ring 3.
+    // KERNEL_GS_BASE should be the cpu_local_t pointer.
+    cpu_local_t *cl = cpu_local();
+    wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)(uintptr_t)cl);
+
+    // Set kernel_stack_top in cpu_local for the syscall trampoline
+    cl->kernel_stack_top = (uint64_t)(cur->stack + cur->stack_size);
+
+    // Load the realm's page table
+    if (cur->page_table)
+        vmm_load(cur->page_table);
+
+    // Build iretq frame and jump to Ring 3:
+    //   iretq pops: RIP, CS, RFLAGS, RSP, SS
+    __asm__ volatile (
+        "mov $0x1B, %%ax    \n"   // GDT_USER_DATA_RPL3 = 0x1B
+        "mov %%ax, %%ds     \n"
+        "mov %%ax, %%es     \n"
+        "xor %%ax, %%ax     \n"   // clear user GS before swapgs context
+        "mov %%ax, %%gs     \n"
+        "push $0x1B         \n"   // SS  = GDT_USER_DATA_RPL3
+        "push %[ursp]       \n"   // RSP = user stack
+        "push $0x202        \n"   // RFLAGS = IF set
+        "push $0x23         \n"   // CS  = GDT_USER_CODE_RPL3
+        "push %[urip]       \n"   // RIP = user entry point
+        "swapgs             \n"   // swap GS to user (0) before entering Ring 3
+        "iretq              \n"
+        :
+        : [ursp] "r"(cur->user_rsp),
+          [urip] "r"(cur->user_rip)
+        : "memory", "ax"
+    );
+    __builtin_unreachable();
+}
+
+// ── task_create_user ──────────────────────────────────────────────────────
+task_t *task_create_user(const char *name, struct realm *realm,
+                         uint64_t entry, uint64_t user_stack,
+                         size_t kernel_stack_sz) {
+    // Create a kernel task that will trampoline into Ring 3
+    task_t *t = task_create(name, (task_fn_t)user_task_trampoline, NULL,
+                            kernel_stack_sz ? kernel_stack_sz : 32 * 1024);
+    if (!t) return NULL;
+
+    t->realm      = realm;
+    t->page_table = NULL;    // set by realm_add_task
+    t->user_rip   = entry;
+    t->user_rsp   = user_stack;
+
+    // Pin to BSP until AP preempt_cnt bug is fixed
+    t->cpu_affinity = 0;
+
+    return t;
 }
 
 // ── Idle task ─────────────────────────────────────────────────────────────
@@ -175,6 +240,23 @@ static void sched_run_next(void) {
     next->state    = TASK_RUNNING;
     next->last_cpu = cpu_id;
     cpu_current[cpu_id] = next;
+
+    // Phase 4: TSS RSP0 update for user-mode tasks
+    // When a Ring 3 task takes a hardware interrupt, the CPU loads RSP0
+    // from the TSS.  We must point it at this task's kernel stack.
+    if (next->realm != NULL) {
+        tss_set_rsp0((uint64_t)(next->stack + next->stack_size));
+    }
+
+    // Phase 4: Page table switching
+    // User tasks have their own address space; kernel tasks share the
+    // kernel page table.
+    if (next->page_table) {
+        vmm_load(next->page_table);
+    } else if (cur && cur->page_table) {
+        // Switching from user task back to kernel task
+        vmm_load(kernel_page_table);
+    }
 
     spinlock_release(&sched_lock);
 

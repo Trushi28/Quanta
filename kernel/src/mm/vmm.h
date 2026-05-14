@@ -15,8 +15,9 @@
 
 #define VMM_KERNEL_RW  (VMM_FLAG_PRESENT|VMM_FLAG_WRITE|VMM_FLAG_GLOBAL)
 #define VMM_KERNEL_RO  (VMM_FLAG_PRESENT|VMM_FLAG_GLOBAL|VMM_FLAG_NX)
-#define VMM_USER_RW    (VMM_FLAG_PRESENT|VMM_FLAG_WRITE|VMM_FLAG_USER)
-#define VMM_USER_RO    (VMM_FLAG_PRESENT|VMM_FLAG_USER|VMM_FLAG_NX)
+#define VMM_USER_RX    (VMM_FLAG_PRESENT|VMM_FLAG_USER)                    // read+exec, NX clear
+#define VMM_USER_RW    (VMM_FLAG_PRESENT|VMM_FLAG_WRITE|VMM_FLAG_USER|VMM_FLAG_NX) // read+write, NX set (W^X)
+#define VMM_USER_RO    (VMM_FLAG_PRESENT|VMM_FLAG_USER|VMM_FLAG_NX)        // read-only, NX set
 
 typedef struct { uint64_t pml4_phys; } page_table_t;
 

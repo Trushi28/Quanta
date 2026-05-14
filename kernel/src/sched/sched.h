@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "../lib/list.h"
+#include "../mm/vmm.h"
 
 // ---------------------------------------------------------------------------
 //  sched/sched.h — Preemptive round-robin scheduler
@@ -28,13 +29,15 @@ typedef struct __attribute__((packed)) {
     uint64_t rip;
 } task_ctx_t;
 
+struct realm;  // forward declaration
+
 typedef struct task {
     list_node_t   list;
     list_node_t   all_tasks;
 
     uint32_t      pid;
     uint32_t      cpu_affinity;   // 0xFF = any CPU
-    uint32_t      last_cpu;       // which CPU last ran this task (NEW)
+    uint32_t      last_cpu;       // which CPU last ran this task
     task_state_t  state;
     int           exit_code;
 
@@ -45,6 +48,12 @@ typedef struct task {
     uint64_t      ticks_total;    // total 1ms ticks consumed
     uint64_t      wake_tick;      // tick to wake up (if SLEEPING)
 
+    // Phase 4: Realm association and user-mode context
+    struct realm *realm;          // owning realm (NULL = kernel task)
+    page_table_t *page_table;     // per-task page table (from realm)
+    uint64_t      user_rip;       // Ring 3 entry point
+    uint64_t      user_rsp;       // Ring 3 stack pointer
+
     char          name[TASK_NAME_MAX];
 } task_t;
 
@@ -53,6 +62,9 @@ typedef void (*task_fn_t)(void *arg);
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 void    sched_init(void);
 task_t *task_create(const char *name, task_fn_t fn, void *arg, size_t stack_sz);
+task_t *task_create_user(const char *name, struct realm *realm,
+                         uint64_t entry, uint64_t user_stack,
+                         size_t kernel_stack_sz);
 void    sched_add(task_t *task);
 
 // ── Scheduling ────────────────────────────────────────────────────────────

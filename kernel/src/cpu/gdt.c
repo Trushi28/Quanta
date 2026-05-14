@@ -139,8 +139,8 @@ void gdt_init(void) {
     gdt[0] = (gdt_entry_t){0};
     gdt[1] = make_entry(KCODE_ACCESS, GRAN_4K|GRAN_64BIT|GRAN_LIMIT);
     gdt[2] = make_entry(KDATA_ACCESS, GRAN_4K|GRAN_LIMIT);
-    gdt[3] = make_entry(UCODE_ACCESS, GRAN_4K|GRAN_64BIT|GRAN_LIMIT);
-    gdt[4] = make_entry(UDATA_ACCESS, GRAN_4K|GRAN_LIMIT);
+    gdt[3] = make_entry(UDATA_ACCESS, GRAN_4K|GRAN_LIMIT);   // 0x18 udata — SYSRET SS
+    gdt[4] = make_entry(UCODE_ACCESS, GRAN_4K|GRAN_64BIT|GRAN_LIMIT); // 0x20 ucode — SYSRET CS
     install_tss(gdt, tss, stk);
 
     volatile gdtr_t gdtr = {
@@ -150,4 +150,19 @@ void gdt_init(void) {
 
     gdt_flush((uint64_t)(uintptr_t)&gdtr, GDT_KERNEL_CODE, GDT_KERNEL_DATA);
     tss_flush(GDT_TSS_SEL);
+}
+
+// ── tss_set_rsp0 ─────────────────────────────────────────────────────────
+// Update RSP0 in the current CPU's TSS so hardware interrupts from Ring 3
+// land on the correct kernel stack.
+void tss_set_rsp0(uint64_t rsp0) {
+    // Use the same slot counter as gdt_init; for the BSP this is slot 0.
+    // In practice we need the per-CPU index.  Since cpu_local() is
+    // available by the time user tasks run, use cpu_id.
+    extern cpu_local_t *cpu_local(void);  // from smp.h via inline
+    // Avoid circular include — just read GS:8 directly for cpu_id
+    uint32_t cpu_id;
+    __asm__ volatile ("mov %%gs:8, %0" : "=r"(cpu_id));  // cpu_local_t.cpu_id is at offset 8
+    if (cpu_id >= MAX_CPUS_GDT) cpu_id = 0;
+    tss_table[cpu_id].rsp0 = rsp0;
 }

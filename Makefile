@@ -32,7 +32,7 @@ ISO_DIR    := $(BUILD_DIR)/iso_root
 # Sources — auto-discover all .c and .S files under kernel/src/
 # ---------------------------------------------------------------------------
 C_SOURCES := $(shell find $(SRC_DIR) -name '*.c')
-S_SOURCES := $(shell find $(SRC_DIR) -name '*.S')
+S_SOURCES := $(shell find $(SRC_DIR) -name '*.S' ! -name 'test_user.S')
 
 C_OBJECTS := $(patsubst $(SRC_DIR)/%.c,  $(BUILD_DIR)/%.o,   $(C_SOURCES))
 S_OBJECTS := $(patsubst $(SRC_DIR)/%.S,  $(BUILD_DIR)/%.S.o, $(S_SOURCES))
@@ -64,9 +64,9 @@ CFLAGS := \
     -mcmodel=kernel                 \
     -I$(KERNEL_DIR)/include         \
     -I$(SRC_DIR)                    \
-    -DQUANTA_VERSION=\"2.5.0\"      \
+    -DQUANTA_VERSION=\"3.0.0\"      \
     -DQUANTA_ARCH=\"x86_64\"        \
-    -DQUANTA_CODENAME=\"Foundation\" \
+    -DQUANTA_CODENAME=\"Realm\"     \
     -Wa,--noexecstack 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +90,30 @@ LIMINE_VERSION := v8.x-binary
 LIMINE_REPO    := https://github.com/limine-bootloader/limine.git
 
 # ---------------------------------------------------------------------------
+# Test userspace binary (Ring 3 hello world)
+# ---------------------------------------------------------------------------
+TEST_USER_ASM := $(SRC_DIR)/realm/test_user.S
+TEST_USER_ELF := $(BUILD_DIR)/test_user.elf
+TEST_USER_HDR := $(SRC_DIR)/realm/test_user_bin.h
+
+$(TEST_USER_ELF): $(TEST_USER_ASM)
+	@mkdir -p $(dir $@)
+	$(CC) -m64 -nostdlib -static -Wl,-Ttext=0x400000 -Wl,--no-dynamic-linker \
+	    -Wa,--noexecstack -Wl,-z,noexecstack $< -o $@
+	@echo "[USER] $@"
+
+$(TEST_USER_HDR): $(TEST_USER_ELF)
+	xxd -i $< | sed 's/unsigned/static const unsigned/' > $@
+	@echo "[XXD]  $@"
+
+.PHONY: test_user
+test_user: $(TEST_USER_HDR)
+
+# ---------------------------------------------------------------------------
 # Default target
 # ---------------------------------------------------------------------------
 .PHONY: all
-all: generate_stubs $(KERNEL_ELF)
+all: generate_stubs test_user $(KERNEL_ELF)
 
 # ---------------------------------------------------------------------------
 # Compile C sources

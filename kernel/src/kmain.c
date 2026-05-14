@@ -28,6 +28,7 @@
 #include "cpu/msr.h"
 #include "cpu/power.h"
 #include "cpu/smp.h"
+#include "cpu/syscall.h"
 #include "drivers/framebuffer.h"
 #include "drivers/keyboard.h"
 #include "drivers/kvstore.h"
@@ -39,6 +40,9 @@
 #include "mm/heap.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "realm/realm.h"
+#include "realm/elf.h"
+#include "realm/uspace.h"
 #include "sched/sched.h"
 #include "shell/shell.h"
 #include "version.h"
@@ -48,7 +52,7 @@
 
 // Total splash progress steps — must match the number of
 // fb_splash_progress() calls below so the bar reaches 100%.
-#define SPLASH_TOTAL 17
+#define SPLASH_TOTAL 20
 
 // ── APIC timer IRQ → scheduler tick ──────────────────────────────────────
 static void apic_timer_irq(registers_t *r) {

@@ -24,6 +24,7 @@
 // ============================================================
 #include "isr.h"
 #include "../lib/kprintf.h"
+#include "../sched/sched.h"
 #include "apic.h"
 #include "idt.h"
 #include <stddef.h>
@@ -133,6 +134,34 @@ void isr_dispatch(registers_t *r) {
       kprintf("\n[BREAKPOINT] RIP=0x%016llx\n", (unsigned long long)r->rip);
       return;
     }
+
+    // ── Page Fault (vector 14) — user-mode containment ────────────────
+    if (v == 14) {
+      uint64_t cr2;
+      __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+
+      // Error code bit 2: U/S flag (1 = user-mode fault)
+      if (r->error_code & (1ULL << 2)) {
+        // User-mode page fault — contained.  Kill the faulting task.
+        kprintf("\n[PAGE FAULT] User-mode fault contained\n"
+                "  Faulting addr : 0x%016llx\n"
+                "  RIP           : 0x%016llx\n"
+                "  Error code    : 0x%llx (%s%s%s)\n",
+                (unsigned long long)cr2,
+                (unsigned long long)r->rip,
+                (unsigned long long)r->error_code,
+                (r->error_code & 1) ? "protection" : "not-present",
+                (r->error_code & 2) ? " write"     : " read",
+                (r->error_code & 16) ? " ifetch"   : "");
+
+        // Terminate the faulting task cleanly
+        // sched_exit is noreturn — it will switch to the next task
+        sched_exit(-14);
+        __builtin_unreachable();
+      }
+      // Kernel-mode page fault — fall through to panic
+    }
+
     kpanic("\n*** Quanta Kernel Panic ***\n"
            "Exception #%llu: %s\n"
            "Error Code : 0x%016llx\n"
