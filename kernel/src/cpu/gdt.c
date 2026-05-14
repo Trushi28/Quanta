@@ -156,13 +156,10 @@ void gdt_init(void) {
 // Update RSP0 in the current CPU's TSS so hardware interrupts from Ring 3
 // land on the correct kernel stack.
 void tss_set_rsp0(uint64_t rsp0) {
-    // Use the same slot counter as gdt_init; for the BSP this is slot 0.
-    // In practice we need the per-CPU index.  Since cpu_local() is
-    // available by the time user tasks run, use cpu_id.
-    extern cpu_local_t *cpu_local(void);  // from smp.h via inline
-    // Avoid circular include — just read GS:8 directly for cpu_id
+    // Read cpu_id directly from GS:8 (cpu_local_t.cpu_id offset)
+    // to avoid circular includes with smp.h
     uint32_t cpu_id;
-    __asm__ volatile ("mov %%gs:8, %0" : "=r"(cpu_id));  // cpu_local_t.cpu_id is at offset 8
+    __asm__ volatile ("mov %%gs:8, %0" : "=r"(cpu_id));
     if (cpu_id >= MAX_CPUS_GDT) cpu_id = 0;
     tss_table[cpu_id].rsp0 = rsp0;
 }

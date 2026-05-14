@@ -97,7 +97,7 @@ static int64_t sys_write(uint64_t fd, uint64_t user_buf, uint64_t len) {
     if (fd == 1 || fd == 2) {
         // stdout/stderr → serial + framebuffer
         for (size_t i = 0; i < len; i++) {
-            serial_putchar(kbuf[i]);
+            serial_write_char(kbuf[i]);
             fb_putchar(kbuf[i]);
         }
         return (int64_t)len;

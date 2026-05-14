@@ -7,6 +7,9 @@
 //
 //  Compiled by the Makefile into a static ELF64 linked at 0x400000,
 //  then converted to a C byte array via xxd for embedding in the kernel.
+//
+//  NOTE: Everything is in .text to keep a single PT_LOAD segment.
+//  Length is hardcoded to avoid GAS Intel-syntax .equ ambiguity.
 // ============================================================
 
 .intel_syntax noprefix
@@ -16,11 +19,11 @@
 .global _start
 
 _start:
-    // ── SYS_WRITE(1, msg, msg_len) ─────────────────────────
+    // ── SYS_WRITE(1, msg, 19) ──────────────────────────────
     mov  rax, 1             // SYS_WRITE
     mov  rdi, 1             // fd = stdout
-    lea  rsi, [rip + msg]   // buf = message
-    mov  rdx, msg_len       // len
+    lea  rsi, [rip + msg]   // buf = message (RIP-relative)
+    mov  rdx, 19            // len = 19 bytes (hardcoded)
     syscall
 
     // ── SYS_EXIT(0) ────────────────────────────────────────
@@ -31,9 +34,8 @@ _start:
     // Should never reach here
     ud2
 
-.section .rodata
 msg:
     .ascii "Hello from Ring 3!\n"
-.equ msg_len, . - msg
+    // len = 19 bytes: "Hello from Ring 3!\n"
 
 .section .note.GNU-stack,"",@progbits

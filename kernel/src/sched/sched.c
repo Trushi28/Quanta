@@ -118,20 +118,32 @@ static void user_task_trampoline(void) {
     if (cur->page_table)
         vmm_load(cur->page_table);
 
+    // CRITICAL: Set GS_BASE to 0 (user value) BEFORE swapgs.
+    // Setting the GS segment selector to 0 does NOT clear GS_BASE MSR.
+    // We must use wrmsr to explicitly zero it so that after swapgs:
+    //   GS_BASE       = KERNEL_GS_BASE (cpu_local) ← kernel will see this
+    //   KERNEL_GS_BASE = old GS_BASE (0)           ← user value preserved
+    // Wait — that's backwards. swapgs swaps GS_BASE ↔ KERNEL_GS_BASE.
+    // We want after swapgs: GS_BASE=0 (user in Ring 3), KERNEL_GS_BASE=cpu_local
+    // So BEFORE swapgs: GS_BASE must be cpu_local, KERNEL_GS_BASE must be 0.
+    // Then swapgs gives: GS_BASE=0, KERNEL_GS_BASE=cpu_local. ✓
+    // On syscall entry: swapgs again → GS_BASE=cpu_local. ✓
+    wrmsr(MSR_KERNEL_GS_BASE, 0);
+    // GS_BASE is already cpu_local (we're in kernel mode).
+    // After swapgs: GS_BASE=0, KERNEL_GS_BASE=cpu_local. Perfect.
+
     // Build iretq frame and jump to Ring 3:
     //   iretq pops: RIP, CS, RFLAGS, RSP, SS
     __asm__ volatile (
         "mov $0x1B, %%ax    \n"   // GDT_USER_DATA_RPL3 = 0x1B
         "mov %%ax, %%ds     \n"
         "mov %%ax, %%es     \n"
-        "xor %%ax, %%ax     \n"   // clear user GS before swapgs context
-        "mov %%ax, %%gs     \n"
         "push $0x1B         \n"   // SS  = GDT_USER_DATA_RPL3
         "push %[ursp]       \n"   // RSP = user stack
         "push $0x202        \n"   // RFLAGS = IF set
         "push $0x23         \n"   // CS  = GDT_USER_CODE_RPL3
         "push %[urip]       \n"   // RIP = user entry point
-        "swapgs             \n"   // swap GS to user (0) before entering Ring 3
+        "swapgs             \n"   // GS_BASE=cpu_local → 0, KERNEL_GS_BASE=0 → cpu_local
         "iretq              \n"
         :
         : [ursp] "r"(cur->user_rsp),
