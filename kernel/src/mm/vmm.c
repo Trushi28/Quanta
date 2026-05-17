@@ -45,6 +45,55 @@ page_table_t *vmm_new_space(void) {
     return pt;
 }
 
+static uint64_t free_user_tree(uint64_t table_phys, int level) {
+    uint64_t *table = (uint64_t *)phys_to_virt(table_phys);
+    uint64_t freed = 0;
+
+    for (int i = 0; i < ENTRIES; i++) {
+        uint64_t entry = table[i];
+        if (!(entry & VMM_FLAG_PRESENT))
+            continue;
+
+        uint64_t phys = entry_phys(entry);
+        table[i] = 0;
+
+        if (level == 1 || (entry & VMM_FLAG_HUGE)) {
+            pmm_free(phys);
+            freed++;
+        } else {
+            freed += free_user_tree(phys, level - 1);
+            pmm_free(phys);
+            freed++;
+        }
+    }
+
+    return freed;
+}
+
+uint64_t vmm_destroy_space(page_table_t *pt) {
+    if (!pt || pt == kernel_page_table || !pt->pml4_phys)
+        return 0;
+
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(pt->pml4_phys);
+    uint64_t freed = 0;
+
+    for (int i = 0; i < 256; i++) {
+        uint64_t entry = pml4[i];
+        if (!(entry & VMM_FLAG_PRESENT))
+            continue;
+
+        uint64_t phys = entry_phys(entry);
+        pml4[i] = 0;
+        freed += free_user_tree(phys, 3);
+        pmm_free(phys);
+        freed++;
+    }
+
+    pmm_free(pt->pml4_phys);
+    pt->pml4_phys = 0;
+    return freed + 1;
+}
+
 int vmm_map_page(page_table_t *pt, uint64_t virt, uint64_t phys, uint64_t flags) {
     if (!pt) return -1;
     uint64_t *tables[4];
@@ -97,16 +146,20 @@ void vmm_load(page_table_t *pt) {
 
 page_table_t *vmm_current(void) { return kernel_page_table; }
 
+void vmm_cpu_init(void) {
+    // Enable NXE + SCE in EFER
+    uint64_t efer = rdmsr(MSR_EFER);
+    efer |= EFER_NXE | EFER_SCE;
+    wrmsr(MSR_EFER, efer);
+}
+
 void vmm_init(void) {
     uint64_t cr3;
     __asm__ volatile ("mov %%cr3,%0":"=r"(cr3));
     kernel_page_table = alloc_pt_struct();
     kernel_page_table->pml4_phys = cr3 & PAGE_MASK;
 
-    // Enable NXE + SCE in EFER
-    uint64_t efer = rdmsr(MSR_EFER);
-    efer |= EFER_NXE | EFER_SCE;
-    wrmsr(MSR_EFER, efer);
+    vmm_cpu_init();
 
     kprintf("[VMM] PML4 phys=0x%llx  NX+SCE enabled\n",
             (unsigned long long)kernel_page_table->pml4_phys);

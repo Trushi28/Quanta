@@ -13,6 +13,8 @@
 #include "../mm/vmm.h"
 #include "../sched/sched.h"
 #include "../fs/vfs.h"
+#include "elf.h"
+#include "uspace.h"
 #include <stddef.h>
 
 // ── Global state ──────────────────────────────────────────────────────────
@@ -85,9 +87,11 @@ int realm_destroy(uint32_t id) {
     uint64_t rflags = spinlock_irq_acquire(&realm_lock);
 
     realm_t *r = NULL;
+    int slot = -1;
     for (int i = 0; i < realm_pool_used; i++) {
         if (realm_pool[i] && realm_pool[i]->id == id) {
             r = realm_pool[i];
+            slot = i;
             break;
         }
     }
@@ -104,19 +108,27 @@ int realm_destroy(uint32_t id) {
         if (r->tasks[i]) {
             // Mark zombie — scheduler will clean up
             r->tasks[i]->state = TASK_ZOMBIE;
+            r->tasks[i]->realm = NULL;
+            r->tasks[i]->page_table = NULL;
             r->tasks[i] = NULL;
         }
     }
     r->task_count = 0;
 
     list_remove(&r->list);
+    if (slot >= 0) {
+        for (int i = slot; i < realm_pool_used - 1; i++)
+            realm_pool[i] = realm_pool[i + 1];
+        realm_pool[--realm_pool_used] = NULL;
+    }
 
     spinlock_irq_release(&realm_lock, rflags);
 
-    kprintf("[REALM] Destroyed realm #%u '%s'\n", r->id, r->name);
-
-    // TODO: walk page tables, unmap and free all user pages
-    // For Phase 4, we leak the pages.  Full cleanup in Phase 5+.
+    uint64_t freed = vmm_destroy_space(r->page_table);
+    r->page_table = NULL;
+    r->page_count = 0;
+    kprintf("[REALM] Destroyed realm #%u '%s'  freed=%llu pages\n",
+            r->id, r->name, (unsigned long long)freed);
 
     kfree(r);
     return 0;
@@ -126,6 +138,12 @@ int realm_destroy(uint32_t id) {
 int realm_destroy_current(void) {
     realm_t *r = realm_current();
     if (!r) return -1;
+    task_t *cur = sched_current();
+    if (cur) {
+        cur->realm = NULL;
+        cur->page_table = NULL;
+    }
+    vmm_load(kernel_page_table);
     int rc = realm_destroy(r->id);
     // After destroying, the current task should exit
     sched_exit(-1);
@@ -169,6 +187,37 @@ int realm_add_task(realm_t *r, struct task *t) {
     return 0;
 }
 
+struct task *realm_exec(realm_t *r, const void *binary, size_t size,
+                        const char *task_name, uint32_t cpu_affinity) {
+    if (!r || !binary || !size)
+        return NULL;
+
+    uint64_t entry = elf_load(r, binary, size);
+    if (!entry)
+        return NULL;
+
+    uint64_t ustack = uspace_build_stack(r);
+    if (!ustack)
+        return NULL;
+
+    task_t *t = task_create_user(task_name ? task_name : r->name,
+                                 r, entry, ustack, 32 * 1024);
+    if (!t)
+        return NULL;
+
+    t->cpu_affinity = cpu_affinity;
+    if (realm_add_task(r, t) != 0) {
+        t->state = TASK_ZOMBIE;
+        return NULL;
+    }
+
+    r->state = REALM_RUNNING;
+    kprintf("[REALM] Exec realm #%u '%s'  task=%u  entry=0x%llx  stack=0x%llx\n",
+            r->id, r->name, t->pid,
+            (unsigned long long)entry, (unsigned long long)ustack);
+    return t;
+}
+
 // ── realm_remove_task ─────────────────────────────────────────────────────
 void realm_remove_task(realm_t *r, struct task *t) {
     if (!r || !t) return;
@@ -182,6 +231,10 @@ void realm_remove_task(realm_t *r, struct task *t) {
             break;
         }
     }
+    ((task_t *)t)->realm = NULL;
+    ((task_t *)t)->page_table = NULL;
+    if (r->task_count == 0 && r->state == REALM_RUNNING)
+        r->state = REALM_STOPPED;
     spinlock_irq_release(&realm_lock, rflags);
 }
 

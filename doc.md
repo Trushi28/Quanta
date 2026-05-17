@@ -967,17 +967,17 @@ FMASK       = 0x200            Clear IF on syscall entry (disable interrupts)
 
 | Component | Status | Depends On |
 |---|---|---|
-| GDT fix (udata↔ucode swap) | Pending | — |
-| Page fault handler (user faults) | Pending | GDT fix |
-| SYSCALL/SYSRET trampoline | Pending | GDT fix |
-| syscall_dispatch (C handler) | Pending | Trampoline |
-| `realm_t` kernel object | Pending | Heap |
-| `realm_create / destroy` | Pending | VMM, PMM |
-| User address space builder | Pending | VMM |
-| ELF64 segment loader | Pending | VMM, realm_t |
-| LibOS Realm foundation | Pending | realm_t |
-| `SYS_LIBOS_FETCH` | Pending | LibOS + VFS |
-| First Ring 3 task | Pending | All above |
+| GDT fix (udata↔ucode swap) | Done | — |
+| Page fault handler (user faults) | Done | GDT fix |
+| SYSCALL/SYSRET trampoline | Done | GDT fix |
+| syscall_dispatch (C handler) | Done | Trampoline |
+| `realm_t` kernel object | Done | Heap |
+| `realm_create / destroy` | Done | VMM, PMM |
+| User address space builder | Done | VMM |
+| ELF64 segment loader | Done | VMM, realm_t |
+| LibOS Realm foundation | Done | realm_t |
+| `SYS_LIBOS_FETCH` | Stubbed | LibOS + VFS |
+| First Ring 3 task | Done | All above |
 
 ---
 
@@ -990,7 +990,7 @@ and return via syscall.
 
 Deliverables:
 - SYSCALL/SYSRET trampoline + syscall_dispatch
-- `realm_t` as kernel object, full lifecycle management
+- `realm_t` as kernel object, lifecycle management, and user page cleanup
 - User address space construction and stack mapping
 - ELF64 binary loader (PT_LOAD segments, RX/RW/RO)
 - Page fault handler: user faults contained, kernel faults panic

@@ -24,6 +24,7 @@
 // ============================================================
 #include "isr.h"
 #include "../lib/kprintf.h"
+#include "../realm/realm.h"
 #include "../sched/sched.h"
 #include "apic.h"
 #include "idt.h"
@@ -142,11 +143,19 @@ void isr_dispatch(registers_t *r) {
 
       // Error code bit 2: U/S flag (1 = user-mode fault)
       if (r->error_code & (1ULL << 2)) {
+        task_t *cur = sched_current();
+        realm_t *realm = cur ? (realm_t *)cur->realm : NULL;
         // User-mode page fault — contained.  Kill the faulting task.
         kprintf("\n[PAGE FAULT] User-mode fault contained\n"
+                "  Task          : pid=%u  name=%s\n"
+                "  Realm         : id=%u  name=%s\n"
                 "  Faulting addr : 0x%016llx\n"
                 "  RIP           : 0x%016llx\n"
                 "  Error code    : 0x%llx (%s%s%s)\n",
+                cur ? cur->pid : 0,
+                cur ? cur->name : "none",
+                realm ? realm->id : 0,
+                realm ? realm->name : "none",
                 (unsigned long long)cr2,
                 (unsigned long long)r->rip,
                 (unsigned long long)r->error_code,

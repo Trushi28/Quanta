@@ -41,11 +41,11 @@
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "realm/realm.h"
-#include "realm/elf.h"
-#include "realm/uspace.h"
 #include "sched/sched.h"
 #include "shell/shell.h"
 #include "version.h"
+
+#include "realm/test_user_bin.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -178,10 +178,12 @@ __attribute__((noreturn)) void kmain(void) {
           "  grep [-i] <pat>  — search files with highlighting\n"
           "  wc <file>        — count lines / words / bytes\n"
           "  which <cmd>      — check if a command exists\n"
+          "  dodge            — tiny terminal reflex game\n"
           "  uname            — OS + arch summary\n"
           "  motd             — show this message again\n"
           "  keyboard fix     — sched_yield() replaces hlt in getchar\n"
           "  PageUp/Down/Del  — new keys supported in editor\n"
+          "  Phase 5 prep     — WASM Runtime Realm + LibOS fetch hook\n"
           "\n"
           "Type 'help' for all commands.  Type 'ai <topic>' to ask QAI.\n";
       vfs_write(fd, msg, strlen(msg));
@@ -224,126 +226,113 @@ __attribute__((noreturn)) void kmain(void) {
   fb_splash_done();
 
   // ── Header panel ──────────────────────────────────────────────────────
-  fb_set_color(FB_COLOR_BLACK, 0x0D1F35);
-  {
-    uint32_t cols, rows;
-    fb_get_size(&cols, &rows);
-    (void)rows;
-    for (uint32_t c = 0; c < cols; c++)
-      fb_putchar(' ');
-  }
+  fb_set_color(0x00D4FF, FB_COLOR_BLACK);
+  kprintf("+============================================================================+\n");
+  kprintf("|   ____                    _       __  ____   _____                          |\n"
+          "|  / __ \\____  ____ _   __(_)___ _/ / / __ \\ / ___/    FOUNDATION READY     |\n"
+          "| / / / / __ \\/ __ \\ | / / / __ `/ / / / / / \\__ \\     RING-3 BOUNDARY     |\n"
+          "|/ /_/ / / / / / / / |/ / / /_/ / / / /_/ / ___/ /    REALM SUBSTRATE      |\n"
+          "|\\____/_/ /_/_/ /_/|___/_/\\__,_/_/ /_____/ /____/     LIBOS HOOKS ONLINE   |\n");
+  kprintf("+============================================================================+\n");
 
-  fb_set_color(0x00D4FF, 0x0D1F35);
-  kprintf("   ____                    _       __  ____   _____ \n"
-          "  / __ \\____  ____ _   __(_)___ _/ / / __ \\ / ___/ \n"
-          " / / / / __ \\/ __ \\ | / / / __ `/ / / / / / \\__ \\  \n"
-          "/ /_/ / / / / / / / |/ / / /_/ / / / /_/ / ___/ /  \n"
-          "\\____/_/ /_/_/ /_/|___/_/\\__,_/_/ /_____/ /____/   \n");
+  fb_set_color(0xAADDFF, FB_COLOR_BLACK);
+  kprintf("| Quanta OS v%s \"%s\" (%s) :: x2APIC + SMP + VirtIO + VFS + Realms\n",
+          QUANTA_VERSION, QUANTA_CODENAME, QUANTA_ARCH);
+  fb_set_color(0x335577, FB_COLOR_BLACK);
+  kprintf("+----------------------------------------------------------------------------+\n");
 
-  fb_set_color(0xAADDFF, 0x0D1F35);
-  kprintf("  Quanta OS  v%s  \"%s\"  (%s)\n", QUANTA_VERSION, QUANTA_CODENAME,
-          QUANTA_ARCH);
-
-  fb_draw_hline((char)0xCD, 0x335577, 0x000000);
-  fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
-
-  // Info block
   fb_set_color(0x778899, FB_COLOR_BLACK);
   if (limine_bootloader_info())
-    kprintf("  Bootloader : %s %s\n", limine_bootloader_info()->name,
+    kprintf("| [BOOT] Bootloader : %s %s\n", limine_bootloader_info()->name,
             limine_bootloader_info()->version);
 
   struct limine_kernel_address_response *ka = limine_kernel_addr();
   if (ka)
-    kprintf("  Kernel     : phys 0x%llx  virt 0x%llx\n",
+    kprintf("| [BOOT] Kernel     : phys 0x%llx  virt 0x%llx\n",
             (unsigned long long)ka->physical_base,
             (unsigned long long)ka->virtual_base);
 
   struct limine_boot_time_response *bt = limine_boot_time();
   if (bt)
-    kprintf("  Boot time  : %lld (Unix)\n", (long long)bt->boot_time);
+    kprintf("| [BOOT] Boot time  : %lld (Unix)\n", (long long)bt->boot_time);
 
-  kprintf("  FB         : %llux%llu  %u bpp\n", (unsigned long long)fb->width,
+  kprintf("| [BOOT] Framebuffer: %llux%llu  %u bpp\n", (unsigned long long)fb->width,
           (unsigned long long)fb->height, fb->bpp);
 
   {
     char vendor[13], brand[49];
     cpu_vendor(vendor);
     cpu_brand(brand);
-    kprintf("  CPU        : %s  (%s)\n", vendor, brand);
-    kprintf("  x2APIC     : %s\n", cpu_has_x2apic() ? "supported" : "no");
-    kprintf("  HHDM       : 0x%llx\n",
+    kprintf("| [CPU ] Vendor     : %s\n", vendor);
+    kprintf("| [CPU ] Brand      : %s\n", brand);
+    kprintf("| [CPU ] x2APIC     : %s\n", cpu_has_x2apic() ? "supported" : "no");
+    kprintf("| [MM  ] HHDM       : 0x%llx\n",
             (unsigned long long)limine_hhdm()->offset);
   }
 
-  fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
-  fb_draw_hline('-', 0x335577, FB_COLOR_BLACK);
-  kprintf("\n");
+  {
+    uint64_t total_pages = 0, free_pages = 0;
+    pmm_get_stats(&total_pages, &free_pages);
+    uint64_t used_pages = total_pages - free_pages;
+    kprintf("| [MM  ] Memory     : total=%llu MiB  used=%llu MiB  free=%llu MiB\n",
+            (unsigned long long)(total_pages * PAGE_SIZE / (1024 * 1024)),
+            (unsigned long long)(used_pages * PAGE_SIZE / (1024 * 1024)),
+            (unsigned long long)(free_pages * PAGE_SIZE / (1024 * 1024)));
+  }
 
-  // ── Ready banner ──────────────────────────────────────────────────────
-  fb_draw_hline((char)0xCD, 0x335577, FB_COLOR_BLACK);
+  fb_set_color(0x335577, FB_COLOR_BLACK);
+  kprintf("+----------------------------------------------------------------------------+\n");
   fb_set_color(0x44EE88, FB_COLOR_BLACK);
-  kprintf("  Quanta OS v%s initialised successfully.\n", QUANTA_VERSION);
+  kprintf("| [ OK ] Kernel substrate initialised successfully.\n");
   fb_set_color(0x778899, FB_COLOR_BLACK);
 
   uint32_t ncpus = (uint32_t)__atomic_load_n(&g_cpu_count, __ATOMIC_SEQ_CST);
   if (!ncpus)
     ncpus = 1;
-  kprintf("  %u CPU(s)  |  %s  |  QuantaFS  |  %s  |  ACPI power\n", ncpus,
+  kprintf("| [ OK ] %u CPU(s) | %s | QuantaFS | %s | ACPI power | SYSCALL | Realm\n",
+          ncpus,
           apic_x2apic_mode() ? "x2APIC" : "xAPIC",
           kv_ready() ? "KV ready" : "KV offline");
-
-  fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
-  fb_draw_hline((char)0xCD, 0x335577, FB_COLOR_BLACK);
-  kprintf("\n");
+  fb_set_color(0xAADDFF, FB_COLOR_BLACK);
+  kprintf("| [NEXT] Phase 5 handoff prepared: WASM Runtime Realm + LibOS fetch hook\n");
+  fb_set_color(0x335577, FB_COLOR_BLACK);
+  kprintf("+============================================================================+\n\n");
 
   // ── Status bar ────────────────────────────────────────────────────────
-  fb_statusbar_set("Quanta OS v" QUANTA_VERSION
-                   "  |  help  edit  calc  grep  wc  shutdown  ai");
+  fb_statusbar_set("Quanta Foundation  |  help  top  free  ls  edit  calc  ai");
   fb_statusbar_refresh();
+
+  // ── Phase 4: Ring 3 test binary ───────────────────────────────────────
+  // The test binary is embedded as a C byte array (generated by Makefile).
+  // We load it into a fresh Native Realm and run it in Ring 3.
+  {
+    kprintf("\n[PHASE4] Launching Ring 3 test binary...\n");
+    realm_t *test_realm = realm_create(REALM_NATIVE, "ring3-test");
+    if (test_realm) {
+      task_t *utask = realm_exec(test_realm, build_test_user_elf,
+                                 build_test_user_elf_len, "ring3-hello", 0);
+      if (utask) {
+        sched_add(utask);
+        kprintf("[PHASE4] Ring 3 task queued  PID=%u  realm=%u\n",
+                utask->pid, test_realm->id);
+      } else {
+        kprintf("[PHASE4] ERROR: realm_exec failed\n");
+        realm_destroy(test_realm->id);
+      }
+    } else {
+      kprintf("[PHASE4] ERROR: Could not create test realm\n");
+    }
+  }
+
+  // Let the proof Realm run before the shell paints its banner, so the
+  // Ring 3 SYS_WRITE output cannot interleave with the first shell screen.
+  sched_yield();
 
   // ── Shell task ────────────────────────────────────────────────────────
   task_t *shell_task = task_create("qai-shell", shell_run, NULL, 64 * 1024);
   if (!shell_task)
     kpanic("[INIT] Cannot create shell task\n");
   sched_add(shell_task);
-
-  // ── Phase 4: Ring 3 test binary ───────────────────────────────────────
-  // The test binary is embedded as a C byte array (generated by Makefile).
-  // We load it into a fresh Native Realm and run it in Ring 3.
-#include "realm/test_user_bin.h"
-  {
-    kprintf("\n[PHASE4] Launching Ring 3 test binary...\n");
-    realm_t *test_realm = realm_create(REALM_NATIVE, "ring3-test");
-    if (test_realm) {
-      uint64_t entry = elf_load(test_realm,
-                                build_test_user_elf,
-                                build_test_user_elf_len);
-      if (entry) {
-        uint64_t ustack = uspace_build_stack(test_realm);
-        if (ustack) {
-          task_t *utask = task_create_user("ring3-hello", test_realm,
-                                           entry, ustack, 32 * 1024);
-          if (utask) {
-            realm_add_task(test_realm, utask);
-            test_realm->state = REALM_RUNNING;
-            sched_add(utask);
-            kprintf("[PHASE4] Ring 3 task PID=%u  entry=0x%llx  stack=0x%llx\n",
-                    utask->pid, (unsigned long long)entry,
-                    (unsigned long long)ustack);
-          } else {
-            kprintf("[PHASE4] ERROR: Could not create user task\n");
-          }
-        } else {
-          kprintf("[PHASE4] ERROR: Could not build user stack\n");
-        }
-      } else {
-        kprintf("[PHASE4] ERROR: ELF load failed\n");
-      }
-    } else {
-      kprintf("[PHASE4] ERROR: Could not create test realm\n");
-    }
-  }
 
   cpu_local()->preempt_cnt = 0;
   sched_yield();

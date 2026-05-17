@@ -22,7 +22,9 @@
 typedef struct { uint64_t pml4_phys; } page_table_t;
 
 void          vmm_init(void);
+void          vmm_cpu_init(void);
 page_table_t *vmm_new_space(void);
+uint64_t      vmm_destroy_space(page_table_t *pt);
 int           vmm_map_page(page_table_t *pt, uint64_t virt, uint64_t phys, uint64_t flags);
 void          vmm_unmap_page(page_table_t *pt, uint64_t virt);
 uint64_t      vmm_virt_to_phys(page_table_t *pt, uint64_t virt);

@@ -71,6 +71,8 @@ void     realm_system_init(void);
 realm_t *realm_create(realm_type_t type, const char *name);
 int      realm_destroy(uint32_t id);
 int      realm_destroy_current(void);
+struct task *realm_exec(realm_t *r, const void *binary, size_t size,
+                        const char *task_name, uint32_t cpu_affinity);
 
 // ── Queries ───────────────────────────────────────────────────────────────
 realm_t *realm_find(uint32_t id);

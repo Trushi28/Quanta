@@ -383,7 +383,7 @@ static int cmd_help(int argc, char **argv) {
   fb_set_color(0x00D4FF, FB_COLOR_BLACK);
   kprintf("\n  Quanta OS v%s — Commands\n", QUANTA_VERSION);
   fb_draw_hline('-', 0x335577, FB_COLOR_BLACK);
-  static const char *cats[] = {"System", "Files", "Shell", "AI", NULL};
+  static const char *cats[] = {"System", "Files", "Shell", "Fun", "AI", NULL};
   for (int ci = 0; cats[ci]; ci++) {
     fb_set_color(0xAADDFF, FB_COLOR_BLACK);
     kprintf("\n  [%s]\n", cats[ci]);
@@ -1185,7 +1185,7 @@ static int cmd_calc(int argc, char **argv) {
   if (argc < 2) {
     shell_print("Usage: calc <expression>\n");
     shell_print("  Example: calc (2 + 3) * 4\n");
-    shell_print("  Supports: + - * / % ( ) and 0x hex literals\n");
+    shell_print("  Supports: + - * / %% ( ) and 0x hex literals\n");
     return 0;
   }
   // Join all arguments into one expression string
@@ -1418,9 +1418,113 @@ static int cmd_shutdown(int argc, char **argv) {
   fb_set_color(0x778899, FB_COLOR_BLACK);
   kprintf("  Sync complete. Powering off.\n");
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
-  for (volatile int i = 0; i < 50000000; i++)
-    __asm__ volatile("pause");
   power_shutdown(); // never returns
+}
+
+// ── dodge — tiny terminal game ───────────────────────────────────────────
+static int cmd_dodge(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  enum { W = 30, H = 10, ROCKS = 8 };
+  int player = W / 2;
+  int rocks_x[ROCKS];
+  int rocks_y[ROCKS];
+  uint32_t rng = (uint32_t)(sched_uptime_ms() ^ 0x5A17C0DEu);
+  int score = 0;
+
+  for (int i = 0; i < ROCKS; i++) {
+    rocks_x[i] = -1;
+    rocks_y[i] = -1;
+  }
+
+  kprintf("\033[2J\033[H");
+  fb_statusbar_set("Dodge  |  A/D:Move  Q:Quit");
+  fb_statusbar_refresh();
+
+  for (;;) {
+    char c = kbd_getchar_noblock();
+    if (c == 'q' || c == 'Q')
+      break;
+    if ((c == 'a' || c == 'A') && player > 1)
+      player--;
+    if ((c == 'd' || c == 'D') && player < W - 2)
+      player++;
+
+    if ((score % 2) == 0) {
+      for (int i = 0; i < ROCKS; i++) {
+        if (rocks_y[i] < 0) {
+          rng = rng * 1664525u + 1013904223u;
+          rocks_x[i] = (int)(rng % (uint32_t)(W - 2)) + 1;
+          rocks_y[i] = 1;
+          break;
+        }
+      }
+    }
+
+    for (int i = 0; i < ROCKS; i++) {
+      if (rocks_y[i] >= 0)
+        rocks_y[i]++;
+      if (rocks_y[i] >= H - 1) {
+        if (rocks_x[i] == player) {
+          fb_set_color(0xFF5555, FB_COLOR_BLACK);
+          kprintf("\033[2J\033[H\n  GAME OVER  score=%d\n\n", score);
+          fb_set_color(0x778899, FB_COLOR_BLACK);
+          kprintf("  Press any key to return to shell.\n");
+          fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
+          kbd_getchar();
+          fb_statusbar_set("Quanta OS v" QUANTA_VERSION
+                           "  |  help  top  free  ls  edit  calc  ai");
+          fb_statusbar_refresh();
+          kprintf("\033[2J\033[H");
+          return 0;
+        }
+        rocks_y[i] = -1;
+      }
+    }
+
+    kprintf("\033[H");
+    fb_set_color(0x33DDCC, FB_COLOR_BLACK);
+    kprintf("  Quanta Dodge     score=%d     A/D move, Q quit\n", score);
+    fb_set_color(0x335577, FB_COLOR_BLACK);
+    kprintf("  +------------------------------+\n");
+    for (int y = 1; y < H; y++) {
+      fb_set_color(0x335577, FB_COLOR_BLACK);
+      kprintf("  |");
+      for (int x = 1; x < W - 1; x++) {
+        int rock = 0;
+        for (int i = 0; i < ROCKS; i++) {
+          if (rocks_x[i] == x && rocks_y[i] == y) {
+            rock = 1;
+            break;
+          }
+        }
+        if (y == H - 1 && x == player) {
+          fb_set_color(0x44EE88, FB_COLOR_BLACK);
+          kprintf("^");
+        } else if (rock) {
+          fb_set_color(0xFF9922, FB_COLOR_BLACK);
+          kprintf("*");
+        } else {
+          fb_set_color(0x111111, FB_COLOR_BLACK);
+          kprintf(".");
+        }
+      }
+      fb_set_color(0x335577, FB_COLOR_BLACK);
+      kprintf("|\n");
+    }
+    kprintf("  +------------------------------+\n");
+    fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
+
+    score++;
+    sched_sleep_ms(85);
+  }
+
+  fb_statusbar_set("Quanta OS v" QUANTA_VERSION
+                   "  |  help  top  free  ls  edit  calc  ai");
+  fb_statusbar_refresh();
+  kprintf("\033[2J\033[H");
+  return 0;
 }
 
 // ── version ───────────────────────────────────────────────────────────────
@@ -1428,18 +1532,21 @@ static int cmd_version(int argc, char **argv) {
   (void)argc;
   (void)argv;
   fb_set_color(0x00D4FF, FB_COLOR_BLACK);
-  kprintf("\n"
-          "   ____                    _       __  ____   _____ \n"
-          "  / __ \\____  ____ _   __(_)___ _/ / / __ \\ / ___/ \n"
-          " / / / / __ \\/ __ \\ | / / / __ `/ / / / / / \\__ \\  \n"
-          "/ /_/ / / / / / / / |/ / / /_/ / / / /_/ / ___/ /  \n"
-          "\\____/_/ /_/_/ /_/|___/_/\\__,_/_/ /_____/ /____/   \n");
+  kprintf("\n+============================================================================+\n"
+          "|   ____                    _       __  ____   _____                          |\n"
+          "|  / __ \\____  ____ _   __(_)___ _/ / / __ \\ / ___/    FOUNDATION SHELL     |\n"
+          "| / / / / __ \\/ __ \\ | / / / __ `/ / / / / / \\__ \\     RING-3 VERIFIED      |\n"
+          "|/ /_/ / / / / / / / |/ / / /_/ / / / /_/ / ___/ /    QAI + QUANTAFS       |\n"
+          "|\\____/_/ /_/_/ /_/|___/_/\\__,_/_/ /_____/ /____/     READY FOR INPUT      |\n"
+          "+============================================================================+\n");
   fb_set_color(0xAADDFF, FB_COLOR_BLACK);
-  kprintf("  Quanta OS  v%s  \"%s\"  (%s)\n", QUANTA_VERSION, QUANTA_CODENAME,
+  kprintf("| Quanta OS  v%s  \"%s\"  (%s)\n", QUANTA_VERSION, QUANTA_CODENAME,
           QUANTA_ARCH);
   fb_set_color(0x778899, FB_COLOR_BLACK);
   kprintf(
-      "  x86-64 | x2APIC | SMP | VirtIO | QuantaFS | KV | QAI | Editor\n\n");
+      "| x86-64 | x2APIC | SMP | VirtIO | QuantaFS | KV | QAI | Editor | Realm\n"
+      "| Foundation complete -> Next: WASM Runtime Realm and LibOS module fetch\n"
+      "+----------------------------------------------------------------------------+\n\n");
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
   return 0;
 }
@@ -1540,6 +1647,7 @@ static void register_builtins(void) {
                      cmd_motd);
   shell_register_cat("kv", "Persistent store: set/get/del/list", "Shell",
                      cmd_kv);
+  shell_register_cat("dodge", "Tiny terminal reflex game", "Fun", cmd_dodge);
   // AI
   shell_register_cat("ai", "Ask the QAI assistant", "AI", cmd_ai);
 }
@@ -1597,10 +1705,10 @@ void shell_run(void *arg) {
 
   // Welcome
   cmd_version(0, NULL);
-  fb_draw_hline('-', 0x335577, FB_COLOR_BLACK);
   fb_set_color(0x778899, FB_COLOR_BLACK);
-  kprintf("  Tab=complete  Up/Down=history  ls -l  edit <file>  calc <expr>\n");
-  kprintf("  New: shutdown  grep  wc  which  uname  motd\n");
+  kprintf("  [keys] Tab=complete  Up/Down=history  Left/Right=cursor\n");
+  kprintf("  [cmds] help  top  free  ls -l  edit <file>  calc <expr>  dodge\n");
+  kprintf("  [ops ] shutdown  reboot  grep  wc  which  uname  motd\n");
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
   fb_draw_hline('-', 0x335577, FB_COLOR_BLACK);
   kprintf("\n");

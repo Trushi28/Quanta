@@ -785,7 +785,7 @@ int ed_open(const char *path) {
   kprintf("\033[2J\033[H");
   fb_set_color(0xFFFFFF, 0x000000);
   fb_statusbar_set("Quanta OS v" QUANTA_VERSION
-                   "  |  help  top  free  ls -l  edit  calc  ai");
+                   "  |  help  top  free  ls  edit  calc  ai");
   fb_statusbar_refresh();
   return 0;
 }

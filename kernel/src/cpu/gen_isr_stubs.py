@@ -23,6 +23,10 @@ def main():
 // ---------------------------------------------------------------------------
 .global isr_common_stub
 isr_common_stub:
+    test QWORD PTR [rsp + 24], 3
+    jz   1f
+    swapgs
+1:
     push rax
     push rbx
     push rcx
@@ -59,6 +63,10 @@ isr_common_stub:
     pop  rbx
     pop  rax
 
+    test QWORD PTR [rsp + 24], 3
+    jz   2f
+    swapgs
+2:
     add  rsp, 16        // discard vector + error_code
     iretq
 

@@ -64,9 +64,9 @@ CFLAGS := \
     -mcmodel=kernel                 \
     -I$(KERNEL_DIR)/include         \
     -I$(SRC_DIR)                    \
-    -DQUANTA_VERSION=\"3.0.0\"      \
-    -DQUANTA_ARCH=\"x86_64\"        \
-    -DQUANTA_CODENAME=\"Realm\"     \
+    -I$(BUILD_DIR)/generated        \
+    -MMD                            \
+    -MP                             \
     -Wa,--noexecstack 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ LIMINE_REPO    := https://github.com/limine-bootloader/limine.git
 # ---------------------------------------------------------------------------
 TEST_USER_ASM := $(SRC_DIR)/realm/test_user.S
 TEST_USER_ELF := $(BUILD_DIR)/test_user.elf
-TEST_USER_HDR := $(SRC_DIR)/realm/test_user_bin.h
+TEST_USER_HDR := $(BUILD_DIR)/generated/realm/test_user_bin.h
 
 $(TEST_USER_ELF): $(TEST_USER_ASM)
 	@mkdir -p $(dir $@)
@@ -103,6 +103,7 @@ $(TEST_USER_ELF): $(TEST_USER_ASM)
 	@echo "[USER] $@"
 
 $(TEST_USER_HDR): $(TEST_USER_ELF)
+	@mkdir -p $(dir $@)
 	xxd -i $< | sed 's/unsigned/static const unsigned/' > $@
 	@echo "[XXD]  $@"
 
@@ -118,7 +119,7 @@ all: generate_stubs test_user $(KERNEL_ELF)
 # ---------------------------------------------------------------------------
 # Compile C sources
 # ---------------------------------------------------------------------------
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(TEST_USER_HDR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 	@echo "[CC]  $<"
@@ -138,6 +139,9 @@ $(KERNEL_ELF): $(OBJECTS) $(KERNEL_DIR)/kernel.ld
 	@mkdir -p $(BUILD_DIR)
 	$(LD) $(LDFLAGS) $(OBJECTS) -o $@
 	@echo "[LD]  $@"
+
+DEPFILES := $(C_OBJECTS:.o=.d)
+-include $(DEPFILES)
 
 # ---------------------------------------------------------------------------
 # Regenerate ISR assembly stubs

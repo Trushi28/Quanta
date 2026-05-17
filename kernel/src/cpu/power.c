@@ -258,34 +258,34 @@ __attribute__((noreturn)) void power_reboot(void) {
 __attribute__((noreturn)) void power_shutdown(void) {
   __asm__ volatile("cli");
 
+  // ── Method 1: QEMU PIIX4 APM shutdown (port 0x0604, value 0x3400) ────
+  // Try this first so the common QEMU path powers off immediately.
+  _outw(0x0604, 0x3400);
+  for (volatile int i = 0; i < 10000; i++)
+    __asm__ volatile("pause");
+
   // SLP_EN bit (bit 13) OR'd with SLP_TYP (bits 12:10)
 #define SLP_EN (1u << 13)
 #define SLP_VAL(t) (uint16_t)(((uint16_t)(t) << 10) | SLP_EN)
 
-  // ── Method 1: ACPI S5 via PM1a control block ─────────────────────────
+  // ── Method 2: ACPI S5 via PM1a/b control blocks ──────────────────────
   if (g_pm1a_cnt) {
     _outw((uint16_t)g_pm1a_cnt, SLP_VAL(g_slp_typ_a));
-    for (volatile int i = 0; i < 2000000; i++)
+    for (volatile int i = 0; i < 10000; i++)
       __asm__ volatile("pause");
   }
   if (g_pm1b_cnt) {
     _outw((uint16_t)g_pm1b_cnt, SLP_VAL(g_slp_typ_b));
-    for (volatile int i = 0; i < 2000000; i++)
+    for (volatile int i = 0; i < 10000; i++)
       __asm__ volatile("pause");
   }
 
 #undef SLP_EN
 #undef SLP_VAL
 
-  // ── Method 2: QEMU PIIX4 APM shutdown (port 0x0604, value 0x3400) ────
-  // S5 with SLP_TYP=5: (5<<10)|0x2000 = 0x1400|0x2000 = 0x3400
-  _outw(0x0604, 0x3400);
-  for (volatile int i = 0; i < 2000000; i++)
-    __asm__ volatile("pause");
-
   // ── Method 3: Old QEMU / Bochs legacy APM ────────────────────────────
   _outw(0xB004, 0x2000);
-  for (volatile int i = 0; i < 2000000; i++)
+  for (volatile int i = 0; i < 10000; i++)
     __asm__ volatile("pause");
 
   // ── Nothing worked — just halt with a message ─────────────────────────

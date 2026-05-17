@@ -21,6 +21,7 @@
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
+#include "../realm/realm.h"
 #include <stddef.h>
 
 #define DEFAULT_STACK_SIZE (32 * 1024)
@@ -34,6 +35,25 @@ static volatile uint64_t g_tick = 0;
 
 static task_t *cpu_current[MAX_CPUS];
 static task_t *idle_tasks [MAX_CPUS];
+
+static int task_can_run_on_cpu(const task_t *t, uint32_t cpu_id) {
+    return t && (t->cpu_affinity == 0xFF || t->cpu_affinity == cpu_id);
+}
+
+static task_t *pop_next_runnable(uint32_t cpu_id) {
+    list_foreach(&run_queue, node) {
+        task_t *t = container_of(node, task_t, list);
+        if (t->state != TASK_RUNNABLE) {
+            list_remove(&t->list);
+            continue;
+        }
+        if (task_can_run_on_cpu(t, cpu_id)) {
+            list_remove(&t->list);
+            return t;
+        }
+    }
+    return NULL;
+}
 
 // ── task_trampoline ───────────────────────────────────────────────────────
 static void task_trampoline(void) {
@@ -240,14 +260,9 @@ static void sched_run_next(void) {
         list_append(&run_queue, &cur->list);
     }
 
-    list_node_t *next_node = list_pop_front(&run_queue);
-    task_t *next;
-
-    if (!next_node) {
+    task_t *next = pop_next_runnable(cpu_id);
+    if (!next)
         next = idle_tasks[cpu_id];
-    } else {
-        next = container_of(next_node, task_t, list);
-    }
 
     next->state    = TASK_RUNNING;
     next->last_cpu = cpu_id;
@@ -265,7 +280,7 @@ static void sched_run_next(void) {
     // kernel page table.
     if (next->page_table) {
         vmm_load(next->page_table);
-    } else if (cur && cur->page_table) {
+    } else {
         // Switching from user task back to kernel task
         vmm_load(kernel_page_table);
     }
@@ -335,6 +350,8 @@ void sched_sleep_ms(uint64_t ms) {
 
 __attribute__((noreturn)) void sched_exit(int code) {
     task_t *cur = sched_current();
+    if (cur && cur->realm)
+        realm_remove_task((realm_t *)cur->realm, cur);
     uint64_t rflags = spinlock_irq_acquire(&sched_lock);
     cur->state     = TASK_ZOMBIE;
     cur->exit_code = code;

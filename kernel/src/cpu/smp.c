@@ -10,6 +10,8 @@
 #include "gdt.h"
 #include "idt.h"
 #include "msr.h"
+#include "syscall.h"
+#include "../mm/vmm.h"
 #include <stddef.h>
 
 volatile uint32_t g_cpu_count = 0;
@@ -53,6 +55,8 @@ void ap_entry(struct limine_smp_info *info) {
   apic_init();
 
   cpu_local_setup(cpu_id, info->lapic_id);
+  vmm_cpu_init();
+  syscall_init();
 
   apic_timer_init(1);
 

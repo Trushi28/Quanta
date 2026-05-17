@@ -13,15 +13,11 @@
 #include "../mm/vmm.h"
 #include "../mm/pmm.h"
 #include "../fs/vfs.h"
+#include "../realm/realm.h"
 #include "../drivers/serial.h"
 #include "../drivers/framebuffer.h"
 #include <stdint.h>
 #include <stddef.h>
-
-// Forward declarations — resolved after realm.h exists
-struct realm;
-extern struct realm *realm_current(void);
-extern int realm_destroy_current(void);
 
 // Assembly trampoline
 extern void syscall_entry(void);
@@ -34,6 +30,18 @@ static int valid_user_ptr(uint64_t addr, uint64_t len) {
     if (addr + len < addr) return 0;   // overflow
     if (addr + len > USER_ADDR_MAX + 1) return 0;
     return 1;
+}
+
+static int valid_user_pages(uint64_t addr, uint64_t n_pages) {
+    if (n_pages == 0) return 0;
+    if (addr & (PAGE_SIZE - 1)) return 0;
+    if (n_pages > ((USER_ADDR_MAX + 1) / PAGE_SIZE)) return 0;
+    return valid_user_ptr(addr, n_pages * PAGE_SIZE);
+}
+
+static int current_has_cap(uint32_t cap) {
+    realm_t *r = realm_current();
+    return r && ((r->caps & cap) == cap);
 }
 
 // ── Copy from user space to kernel buffer ─────────────────────────────────
@@ -86,6 +94,7 @@ void syscall_init(void) {
 // ── Syscall handlers ──────────────────────────────────────────────────────
 
 static int64_t sys_write(uint64_t fd, uint64_t user_buf, uint64_t len) {
+    if (!current_has_cap(CAP_VFS)) return -EQUANTA_PERM;
     if (!valid_user_ptr(user_buf, len)) return -EQUANTA_FAULT;
     if (len == 0) return 0;
     if (len > 4096) len = 4096;  // cap per-call length
@@ -108,6 +117,7 @@ static int64_t sys_write(uint64_t fd, uint64_t user_buf, uint64_t len) {
 }
 
 static int64_t sys_read(uint64_t fd, uint64_t user_buf, uint64_t len) {
+    if (!current_has_cap(CAP_VFS)) return -EQUANTA_PERM;
     if (!valid_user_ptr(user_buf, len)) return -EQUANTA_FAULT;
     if (len == 0) return 0;
     if (len > 4096) len = 4096;
@@ -137,21 +147,33 @@ static int64_t sys_read(uint64_t fd, uint64_t user_buf, uint64_t len) {
     return (int64_t)n;
 }
 
+static int64_t sys_page_release(uint64_t vaddr, uint64_t n_pages);
+
 static int64_t sys_page_request(uint64_t vaddr, uint64_t n_pages, uint64_t flags) {
     (void)flags;
+    if (!current_has_cap(CAP_PAGES)) return -EQUANTA_PERM;
     task_t *cur = sched_current();
     if (!cur || !cur->page_table) return -EQUANTA_FAULT;
-    if (!valid_user_ptr(vaddr, n_pages * PAGE_SIZE)) return -EQUANTA_INVAL;
-    if (vaddr & (PAGE_SIZE - 1)) return -EQUANTA_INVAL;  // must be page-aligned
+    if (!valid_user_pages(vaddr, n_pages)) return -EQUANTA_INVAL;
 
     for (uint64_t i = 0; i < n_pages; i++) {
+        uint64_t va = vaddr + i * PAGE_SIZE;
+        if (vmm_virt_to_phys(cur->page_table, va)) {
+            sys_page_release(vaddr, i);
+            return -EQUANTA_INVAL;
+        }
+
         uint64_t phys = pmm_alloc();
-        if (!phys) return -EQUANTA_NOMEM;
+        if (!phys) {
+            sys_page_release(vaddr, i);
+            return -EQUANTA_NOMEM;
+        }
         // Zero the page
         memset(phys_to_virt(phys), 0, PAGE_SIZE);
-        int rc = vmm_map_page(cur->page_table, vaddr + i * PAGE_SIZE, phys, VMM_USER_RW);
+        int rc = vmm_map_page(cur->page_table, va, phys, VMM_USER_RW);
         if (rc != 0) {
             pmm_free(phys);
+            sys_page_release(vaddr, i);
             return -EQUANTA_NOMEM;
         }
     }
@@ -159,9 +181,10 @@ static int64_t sys_page_request(uint64_t vaddr, uint64_t n_pages, uint64_t flags
 }
 
 static int64_t sys_page_release(uint64_t vaddr, uint64_t n_pages) {
+    if (!current_has_cap(CAP_PAGES)) return -EQUANTA_PERM;
     task_t *cur = sched_current();
     if (!cur || !cur->page_table) return -EQUANTA_FAULT;
-    if (!valid_user_ptr(vaddr, n_pages * PAGE_SIZE)) return -EQUANTA_INVAL;
+    if (!valid_user_pages(vaddr, n_pages)) return -EQUANTA_INVAL;
 
     for (uint64_t i = 0; i < n_pages; i++) {
         uint64_t va = vaddr + i * PAGE_SIZE;
@@ -211,10 +234,9 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2,
         return -EQUANTA_NOSYS;  // Phase 7+
 
     case SYS_REALM_ID: {
-        struct realm *r = realm_current();
+        realm_t *r = realm_current();
         if (!r) return -EQUANTA_FAULT;
-        // realm_id is the first field — we'll cast once realm.h is included
-        return (int64_t)(*(uint32_t *)r);
+        return (int64_t)r->id;
     }
 
     case SYS_REALM_EXIT:
