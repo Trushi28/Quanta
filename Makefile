@@ -216,7 +216,7 @@ QEMU_BASE := \
 run: iso disk
 	$(QEMU_BASE) \
 	    -cdrom $(ISO_IMAGE) \
-	    -device virtio-blk-pci,drive=vblk0 \
+	    -device virtio-blk-pci,drive=vblk0,disable-legacy=on \
 	    -drive id=vblk0,file=$(BUILD_DIR)/disk.img,if=none,format=raw \
 	    -serial stdio \
 	    -display sdl
@@ -225,7 +225,7 @@ run: iso disk
 run-nographic: iso disk
 	$(QEMU_BASE) \
 	    -cdrom $(ISO_IMAGE) \
-	    -device virtio-blk-pci,drive=vblk0 \
+	    -device virtio-blk-pci,drive=vblk0,disable-legacy=on \
 	    -drive id=vblk0,file=$(BUILD_DIR)/disk.img,if=none,format=raw \
 	    -serial stdio \
 	    -display none
@@ -235,7 +235,7 @@ run-kvm: iso disk
 	$(QEMU_BASE) \
 	    -enable-kvm -cpu host \
 	    -cdrom $(ISO_IMAGE) \
-	    -device virtio-blk-pci,drive=vblk0 \
+	    -device virtio-blk-pci,drive=vblk0,disable-legacy=on \
 	    -drive id=vblk0,file=$(BUILD_DIR)/disk.img,if=none,format=raw \
 	    -serial stdio \
 	    -display sdl
@@ -245,7 +245,7 @@ run-uefi: iso disk
 	$(QEMU_BASE) \
 	    -bios /usr/share/ovmf/OVMF.fd \
 	    -cdrom $(ISO_IMAGE) \
-	    -device virtio-blk-pci,drive=vblk0 \
+	    -device virtio-blk-pci,drive=vblk0,disable-legacy=on \
 	    -drive id=vblk0,file=$(BUILD_DIR)/disk.img,if=none,format=raw \
 	    -serial stdio \
 	    -display sdl

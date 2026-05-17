@@ -34,6 +34,7 @@
 #include "drivers/kvstore.h"
 #include "drivers/serial.h"
 #include "drivers/virtio/virtio.h"
+#include "fs/qfs.h"
 #include "fs/vfs.h"
 #include "lib/kprintf.h"
 #include "lib/string.h"
@@ -194,18 +195,10 @@ __attribute__((noreturn)) void kmain(void) {
       vfs_close(fd);
     }
     vfs_mkdir("/home/user", VFS_MODE_DIR);
-    vfs_mkdir("/apps", VFS_MODE_DIR);
-    int wasm_fd = vfs_open("/apps/hello.wasm", O_WRONLY | O_CREAT | O_TRUNC);
-    if (wasm_fd >= 0) {
-      static const uint8_t hello_wasm[] = {
-          0x00, 'a', 's', 'm', 0x01, 0x00, 0x00, 0x00,
-          0x00, 0x17, 0x06, 'q', 'u', 'a', 'n', 't', 'a',
-          'h', 'e', 'l', 'l', 'o', ' ', 'f', 'r', 'o', 'm',
-          ' ', 'w', 'a', 's', 'm', '\n'
-      };
-      vfs_write(wasm_fd, hello_wasm, sizeof(hello_wasm));
-      vfs_close(wasm_fd);
-    }
+    struct limine_kernel_address_response *seed_ka = limine_kernel_addr();
+    qfs_seed_namespace(seed_ka ? seed_ka->physical_base : 0,
+                       seed_ka ? seed_ka->virtual_base : 0,
+                       (uint64_t)(uintptr_t)kmain);
   }
   fb_splash_progress(13, SPLASH_TOTAL, "QuantaFS + devfs mounted");
 
@@ -215,6 +208,7 @@ __attribute__((noreturn)) void kmain(void) {
 
   // ── 18. KV persistent store ───────────────────────────────────────────
   kv_init();
+  qfs_storage_checkpoint();
   fb_splash_progress(15, SPLASH_TOTAL,
                      kv_ready() ? "KV-Store  (sector 2048 ready)"
                                 : "KV-Store  (no disk)");

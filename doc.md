@@ -1017,7 +1017,7 @@ Deliverables:
 - VFS-backed Ring 3 `open`, `close`, `stat`, and `readdir`; fd 0/1/2 are reserved for stdio
 - `SYS_LIBOS_FETCH` resolves registered LibOS runtime modules
 - Capability-gated `SYS_REBOOT` and `SYS_SHUTDOWN` for native-init
-- Native Ring 3 init console: `help`, `ls`, `cat`, `wasm`, `pid`, `realm`, `libos`, `page`, `game`, `reboot`, `shutdown`, `exit`
+- Native Ring 3 init console: `help`, `ls`, `cat`, `wasm`, `kernel`, `fs`, `qfs`, `pid`, `realm`, `libos`, `page`, `game`, `reboot`, `shutdown`, `exit`
 - Kernel QAI shell remains available only as a debug fallback if native-init fails
 
 ---
@@ -1037,15 +1037,26 @@ Deliverables:
 
 ---
 
-## Phase 6 — FAT32 + Persistent Binaries
+## Phase 6 — QuantaFS-Weave (Started)
 
-Move binaries off embedded arrays onto persistent disk storage.
+Create a Quanta-native filesystem instead of cloning FAT32, ext4, or Btrfs.
+The design treats files as projections over a graph of immutable capsules,
+relations, tags, and append-only namespace epochs. The current tranche seeds
+the namespace on top of RamFS; persistence on virtio-blk comes after the model
+stabilizes.
 
 Deliverables:
-- FAT32 driver on virtio-blk
-- Mount FAT32 partition under VFS
-- Load LibOS modules and Realm binaries from disk
-- LibOS module caching across reboots
+- `/system`, `/apps`, and `/qfs` seeded at boot (done)
+- `/system/kernel.elf` ELF64 descriptor for the loaded Ring 0 kernel, readable from Ring 3 (done)
+- `/system/qfs.plan` design document visible through the Ring 3 `fs` command (done)
+- `/qfs/capsules`, `/qfs/tags`, `/qfs/timeline`, and generated view paths (done)
+- Sealed capsule manifests with FNV-1a content IDs for boot files (done)
+- Ring 3 `qfs` command for superblock, capsule catalog, and storage epoch (done)
+- Storage checkpoint writes a QFS journal sector when virtio-blk is available (done)
+- Capsule allocator with content identifiers
+- Append-only epoch journal on virtio-blk
+- View compiler that projects graph objects into path namespaces
+- Load LibOS modules and Realm binaries from QuantaFS-Weave storage
 
 ---
 

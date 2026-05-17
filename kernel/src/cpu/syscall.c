@@ -2,7 +2,7 @@
 //  cpu/syscall.c — SYSCALL MSR setup + syscall_dispatch (Phase 4)
 //
 //  Programs STAR, LSTAR, FMASK MSRs for fast Ring 3 ↔ Ring 0
-//  transitions.  Implements all 13 Quanta syscalls.
+//  transitions.  Implements the Quanta Ring 3 syscall surface.
 // ============================================================
 #include "syscall.h"
 #include "gdt.h"

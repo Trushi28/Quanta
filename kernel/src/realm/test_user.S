@@ -81,6 +81,21 @@ main_loop:
     test eax, eax
     jnz  do_wasm
 
+    lea  rdi, [rip + cmd_kernel]
+    call cmd_eq
+    test eax, eax
+    jnz  do_kernel
+
+    lea  rdi, [rip + cmd_fs]
+    call cmd_eq
+    test eax, eax
+    jnz  do_fs
+
+    lea  rdi, [rip + cmd_qfs]
+    call cmd_eq
+    test eax, eax
+    jnz  do_qfs
+
     lea  rdi, [rip + cmd_page]
     call cmd_eq
     test eax, eax
@@ -156,6 +171,13 @@ libos_fail:
     jmp  main_loop
 
 do_ls:
+    call arg_or_null
+    test rax, rax
+    jz   .defaults
+    mov  rdi, rax
+    call list_dir
+    jmp  main_loop
+.defaults:
     lea  rdi, [rip + root_path]
     call list_dir
     lea  rdi, [rip + apps_path]
@@ -164,12 +186,34 @@ do_ls:
 
 do_cat:
     lea  rdi, [rip + welcome_path]
+    call arg_or_default
+    mov  rdi, rax
     call cat_file
     jmp  main_loop
 
 do_wasm:
     lea  rdi, [rip + hello_wasm_path]
+    call arg_or_default
+    mov  rdi, rax
     call wasm_probe
+    jmp  main_loop
+
+do_kernel:
+    call kernel_probe
+    jmp  main_loop
+
+do_fs:
+    lea  rdi, [rip + qfs_plan_path]
+    call cat_file
+    jmp  main_loop
+
+do_qfs:
+    lea  rdi, [rip + qfs_super_path]
+    call cat_file
+    lea  rdi, [rip + qfs_catalog_path]
+    call cat_file
+    lea  rdi, [rip + qfs_storage_epoch_path]
+    call cat_file
     jmp  main_loop
 
 do_page:
@@ -435,6 +479,78 @@ wasm_fail:
     ret
 
 // ------------------------------------------------------------
+// kernel_probe: inspect /system/kernel.elf as a Ring 3 file.
+// ------------------------------------------------------------
+kernel_probe:
+    lea  rdi, [rip + kernel_elf_path]
+    call cat_elf_header
+    ret
+
+cat_elf_header:
+    push r12
+    mov  r12, rdi
+
+    mov  rax, SYS_OPEN
+    mov  rdi, r12
+    xor  rsi, rsi
+    syscall
+    test rax, rax
+    js   elf_fail
+    mov  r12, rax
+
+    mov  rax, SYS_READ
+    mov  rdi, r12
+    lea  rsi, [rip + file_buf]
+    mov  rdx, 128
+    syscall
+    mov  r11, rax
+
+    mov  rax, SYS_CLOSE
+    mov  rdi, r12
+    syscall
+
+    cmp  r11, 64
+    jl   elf_fail
+    cmp  BYTE PTR [rip + file_buf + 0], 0x7f
+    jne  elf_bad
+    cmp  BYTE PTR [rip + file_buf + 1], 'E'
+    jne  elf_bad
+    cmp  BYTE PTR [rip + file_buf + 2], 'L'
+    jne  elf_bad
+    cmp  BYTE PTR [rip + file_buf + 3], 'F'
+    jne  elf_bad
+    cmp  BYTE PTR [rip + file_buf + 4], 2
+    jne  elf_bad
+    cmp  BYTE PTR [rip + file_buf + 5], 1
+    jne  elf_bad
+
+    lea  rdi, [rip + elf_ok]
+    call puts
+    lea  rdi, [rip + elf_entry]
+    call puts
+    mov  rdi, QWORD PTR [rip + file_buf + 24]
+    call put_hex64
+    call newline
+    lea  rdi, [rip + elf_machine]
+    call puts
+    movzx rdi, WORD PTR [rip + file_buf + 18]
+    call put_u64
+    call newline
+    pop  r12
+    ret
+
+elf_bad:
+    lea  rdi, [rip + elf_bad_text]
+    call puts
+    pop  r12
+    ret
+elf_fail:
+    lea  rdi, [rip + fail_text]
+    call puts
+    pop  r12
+    ret
+
+// ------------------------------------------------------------
 // read_line: fills cmd_buf, echoes input, handles backspace.
 // ------------------------------------------------------------
 read_line:
@@ -485,25 +601,64 @@ read_line:
 
 // ------------------------------------------------------------
 // cmd_eq: rdi = null-terminated literal, compares to cmd_buf.
-// returns eax=1 on match.
+// returns eax=1 when literal is followed by NUL or a space.
 // ------------------------------------------------------------
 cmd_eq:
     lea  rsi, [rip + cmd_buf]
 .cmp:
     mov  al, BYTE PTR [rdi]
     mov  bl, BYTE PTR [rsi]
+    test al, al
+    jz   .end_literal
     cmp  al, bl
     jne  .no
-    test al, al
-    jz   .yes
     inc  rdi
     inc  rsi
     jmp  .cmp
+.end_literal:
+    test bl, bl
+    jz   .yes
+    cmp  bl, ' '
+    je   .yes
+    jmp  .no
 .yes:
     mov  eax, 1
     ret
 .no:
     xor  eax, eax
+    ret
+
+arg_or_null:
+    lea  rsi, [rip + cmd_buf]
+.skip_cmd:
+    mov  al, BYTE PTR [rsi]
+    test al, al
+    jz   .none
+    cmp  al, ' '
+    je   .skip_spaces
+    inc  rsi
+    jmp  .skip_cmd
+.skip_spaces:
+    inc  rsi
+    cmp  BYTE PTR [rsi], ' '
+    je   .skip_spaces
+    cmp  BYTE PTR [rsi], 0
+    je   .none
+    mov  rax, rsi
+    ret
+.none:
+    xor  rax, rax
+    ret
+
+arg_or_default:
+    push rdi
+    call arg_or_null
+    test rax, rax
+    jnz  .has_arg
+    pop  rax
+    ret
+.has_arg:
+    add  rsp, 8
     ret
 
 puts:
@@ -554,13 +709,40 @@ put_u64:
     call puts
     ret
 
+put_hex64:
+    lea  rsi, [rip + num_buf]
+    mov  BYTE PTR [rsi + 0], '0'
+    mov  BYTE PTR [rsi + 1], 'x'
+    mov  rax, rdi
+    mov  rcx, 16
+.hex_loop:
+    mov  rdx, rax
+    shr  rdx, 60
+    cmp  dl, 10
+    jb   .digit
+    add  dl, 'a' - 10
+    jmp  .store
+.digit:
+    add  dl, '0'
+.store:
+    mov  r8, 18
+    sub  r8, rcx
+    mov  BYTE PTR [rsi + r8], dl
+    shl  rax, 4
+    dec  rcx
+    jnz  .hex_loop
+    mov  BYTE PTR [rsi + 18], 0
+    mov  rdi, rsi
+    call puts
+    ret
+
 .section .rodata
 banner:
     .asciz "\n[Ring3 Init] Quanta Native Realm console online.\nType 'help' for user-mode commands.\n"
 prompt:
     .asciz "r3:/ $ "
 help_text:
-    .asciz "commands: help, ls, cat, wasm, pid, realm, libos, page, game, reboot, shutdown, exit\n  ls       -> SYS_OPEN + SYS_READDIR on / and /apps\n  cat      -> read /welcome.txt through Ring 3 VFS syscalls\n  wasm     -> validate /apps/hello.wasm and route to WASI LibOS\n  pid      -> SYS_GETPID\n  realm    -> SYS_REALM_ID\n  libos    -> SYS_LIBOS_FETCH(wasm,wasi_runtime.so)\n  page     -> map/write/unmap one user page\n  game     -> tiny Ring 3 number game\n  reboot   -> SYS_REBOOT (init capability)\n  shutdown -> SYS_SHUTDOWN (init capability)\n"
+    .asciz "commands: help, ls, cat, wasm, kernel, fs, qfs, pid, realm, libos, page, game, reboot, shutdown, exit\n  ls [path]    -> SYS_OPEN + SYS_READDIR\n  cat [path]   -> read a VFS file from Ring 3\n  wasm [path]  -> validate a WASM file and route to WASI LibOS\n  kernel       -> inspect /system/kernel.elf through Ring 3 VFS\n  fs           -> show QuantaFS-Weave design note\n  qfs          -> show superblock, capsule catalog, storage epoch\n  pid/realm    -> identity syscalls\n  libos        -> SYS_LIBOS_FETCH(wasm,wasi_runtime.so)\n  page         -> map/write/unmap one user page\n  game         -> tiny Ring 3 number game\n  reboot/shutdown require native-init CAP_POWER\n"
 unknown:
     .asciz "unknown command; try 'help'\n"
 pid_prefix:
@@ -579,6 +761,14 @@ wasm_bad:
     .asciz "not a supported WASM v1 module\n"
 wasm_sample:
     .asciz "sample payload: "
+elf_ok:
+    .asciz "kernel ELF view OK: /system/kernel.elf\n"
+elf_entry:
+    .asciz "entry="
+elf_machine:
+    .asciz "machine="
+elf_bad_text:
+    .asciz "not an ELF64 little-endian image\n"
 page_ok:
     .asciz "page syscall OK: mapped, wrote, released\n"
 game_text:
@@ -609,6 +799,12 @@ cmd_cat:
     .asciz "cat"
 cmd_wasm:
     .asciz "wasm"
+cmd_kernel:
+    .asciz "kernel"
+cmd_fs:
+    .asciz "fs"
+cmd_qfs:
+    .asciz "qfs"
 cmd_page:
     .asciz "page"
 cmd_game:
@@ -626,9 +822,19 @@ root_path:
 apps_path:
     .asciz "/apps"
 welcome_path:
-    .asciz "/welcome.txt"
+    .asciz "/tmp/welcome.txt"
 hello_wasm_path:
     .asciz "/apps/hello.wasm"
+kernel_elf_path:
+    .asciz "/system/kernel.elf"
+qfs_plan_path:
+    .asciz "/system/qfs.plan"
+qfs_super_path:
+    .asciz "/qfs/super.qfs"
+qfs_catalog_path:
+    .asciz "/qfs/catalog"
+qfs_storage_epoch_path:
+    .asciz "/qfs/timeline/00000001-storage.epoch"
 nl:
     .ascii "\n"
 bs_seq:

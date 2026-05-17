@@ -259,7 +259,7 @@ identity, LibOS lookup, and realm-owned page mapping.
 
 ```
 r3:/ $ help
-commands: help ls cat wasm pid realm libos page game reboot shutdown exit
+commands: help ls cat wasm kernel fs qfs pid realm libos page game reboot shutdown exit
 ```
 
 The QAI shell is still present, but it is now the kernel debug fallback rather
@@ -449,7 +449,7 @@ contextual answers enriched with live kernel data (PMM stats, uptime, CPU).
 3. **Syscall interface** — `SYSCALL`/`SYSRET` (STAR/LSTAR MSRs already enabled)
 4. **ELF loader** — Parse + map ELF64 binaries into user address spaces
 5. **User space** — Ring-3 tasks; syscall gateway; user stack
-6. **FAT32 driver** — Read the virtio-blk disk (replace ramfs persistence)
+6. **QuantaFS-Weave** — Capsule graph, tags, epochs, generated views
 7. **NVMe driver** — PCIe NVMe admin + I/O queues
 8. **Network** — virtio-net driver + minimal IP/UDP stack
 9. **SMP load balancing** — Work-stealing across per-CPU run queues
