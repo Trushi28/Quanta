@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 //  cpu/syscall.h — Quanta OS Syscall Interface (Phase 4)
 //
-//  13 syscalls total.  Everything else is handled in Ring 3 by the LibOS.
+//  19 syscalls total.  Everything else is handled in Ring 3 by the LibOS.
 //  Argument convention follows Linux x86-64 ABI:
 //    RAX=number, RDI=a1, RSI=a2, RDX=a3, R10=a4, R8=a5, R9=a6
 // ---------------------------------------------------------------------------
@@ -13,6 +13,9 @@
 // Core I/O
 #define SYS_READ            0
 #define SYS_WRITE           1
+#define SYS_OPEN            2
+#define SYS_CLOSE           3
+#define SYS_STAT            4
 #define SYS_YIELD          24
 #define SYS_SLEEP          35
 #define SYS_GETPID         39
@@ -30,6 +33,11 @@
 #define SYS_REALM_ID      204
 #define SYS_REALM_EXIT    205
 #define SYS_LIBOS_FETCH   206
+
+// Controlled system power operations
+#define SYS_REBOOT        207
+#define SYS_SHUTDOWN      208
+#define SYS_READDIR       209
 
 // ── Error codes (negative return values) ──────────────────────────────────
 #define EQUANTA_PERM    4    // permission denied

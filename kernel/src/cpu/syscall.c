@@ -7,6 +7,7 @@
 #include "syscall.h"
 #include "gdt.h"
 #include "msr.h"
+#include "power.h"
 #include "../lib/kprintf.h"
 #include "../lib/string.h"
 #include "../sched/sched.h"
@@ -14,6 +15,7 @@
 #include "../mm/pmm.h"
 #include "../fs/vfs.h"
 #include "../realm/realm.h"
+#include "../drivers/keyboard.h"
 #include "../drivers/serial.h"
 #include "../drivers/framebuffer.h"
 #include <stdint.h>
@@ -66,6 +68,49 @@ static int copy_from_user(void *dst, uint64_t user_addr, size_t len) {
         copied += chunk;
     }
     return 0;
+}
+
+static int copy_to_user(uint64_t user_addr, const void *src, size_t len) {
+    task_t *cur = sched_current();
+    if (!cur || !cur->page_table) return -EQUANTA_FAULT;
+
+    const uint8_t *s = (const uint8_t *)src;
+    size_t copied = 0;
+
+    while (copied < len) {
+        uint64_t page_off = (user_addr + copied) & (PAGE_SIZE - 1);
+        size_t chunk = PAGE_SIZE - page_off;
+        if (chunk > len - copied) chunk = len - copied;
+
+        uint64_t phys = vmm_virt_to_phys(cur->page_table, user_addr + copied);
+        if (!phys) return -EQUANTA_FAULT;
+
+        void *kptr = phys_to_virt(phys);
+        memcpy(kptr, s + copied, chunk);
+        copied += chunk;
+    }
+    return 0;
+}
+
+static int copy_user_string(char *dst, uint64_t user_addr, size_t max) {
+    task_t *cur = sched_current();
+    if (!cur || !cur->page_table || !dst || max == 0)
+        return -EQUANTA_FAULT;
+
+    for (size_t i = 0; i < max; i++) {
+        if (!valid_user_ptr(user_addr + i, 1))
+            return -EQUANTA_FAULT;
+        uint64_t phys = vmm_virt_to_phys(cur->page_table, user_addr + i);
+        if (!phys)
+            return -EQUANTA_FAULT;
+        char c = *(char *)phys_to_virt(phys);
+        dst[i] = c;
+        if (c == '\0')
+            return 0;
+    }
+
+    dst[max - 1] = '\0';
+    return -EQUANTA_INVAL;
 }
 
 // ── syscall_init ──────────────────────────────────────────────────────────
@@ -122,29 +167,61 @@ static int64_t sys_read(uint64_t fd, uint64_t user_buf, uint64_t len) {
     if (len == 0) return 0;
     if (len > 4096) len = 4096;
 
+    if (fd == 0) {
+        char c = kbd_getchar();
+        int rc = copy_to_user(user_buf, &c, 1);
+        return rc < 0 ? rc : 1;
+    }
+
     char kbuf[4096];
     ssize_t n = vfs_read((int)fd, kbuf, len);
     if (n <= 0) return (int64_t)n;
 
-    // Copy back to user — need to write to user pages via HHDM
-    task_t *cur = sched_current();
-    if (!cur || !cur->page_table) return -EQUANTA_FAULT;
+    int rc = copy_to_user(user_buf, kbuf, (size_t)n);
+    return rc < 0 ? rc : (int64_t)n;
+}
 
-    size_t written = 0;
-    while (written < (size_t)n) {
-        uint64_t page_off = (user_buf + written) & (PAGE_SIZE - 1);
-        size_t chunk = PAGE_SIZE - page_off;
-        if (chunk > (size_t)n - written) chunk = (size_t)n - written;
+static int64_t sys_open(uint64_t user_path, uint64_t flags) {
+    if (!current_has_cap(CAP_VFS)) return -EQUANTA_PERM;
+    char path[VFS_PATH_MAX];
+    int rc = copy_user_string(path, user_path, sizeof(path));
+    if (rc < 0) return rc;
+    int fd = vfs_open(path, (int)flags);
+    return fd < 0 ? -EQUANTA_NOENT : (int64_t)fd;
+}
 
-        uint64_t phys = vmm_virt_to_phys(cur->page_table, user_buf + written);
-        if (!phys) return -EQUANTA_FAULT;
+static int64_t sys_close(uint64_t fd) {
+    if (!current_has_cap(CAP_VFS)) return -EQUANTA_PERM;
+    int rc = vfs_close((int)fd);
+    return rc < 0 ? -EQUANTA_INVAL : 0;
+}
 
-        void *kptr = phys_to_virt(phys);
-        memcpy(kptr, kbuf + written, chunk);
-        written += chunk;
-    }
+static int64_t sys_stat(uint64_t user_path, uint64_t user_stat) {
+    if (!current_has_cap(CAP_VFS)) return -EQUANTA_PERM;
+    if (!valid_user_ptr(user_stat, sizeof(vfs_stat_t))) return -EQUANTA_FAULT;
 
-    return (int64_t)n;
+    char path[VFS_PATH_MAX];
+    int rc = copy_user_string(path, user_path, sizeof(path));
+    if (rc < 0) return rc;
+
+    vfs_stat_t st;
+    rc = vfs_stat2(path, &st);
+    if (rc < 0) return -EQUANTA_NOENT;
+
+    rc = copy_to_user(user_stat, &st, sizeof(st));
+    return rc < 0 ? rc : 0;
+}
+
+static int64_t sys_readdir(uint64_t fd, uint64_t idx, uint64_t user_name) {
+    if (!current_has_cap(CAP_VFS)) return -EQUANTA_PERM;
+    if (!valid_user_ptr(user_name, VFS_NAME_MAX)) return -EQUANTA_FAULT;
+
+    char name[VFS_NAME_MAX];
+    int rc = vfs_readdir((int)fd, (uint32_t)idx, name);
+    if (rc < 0) return -EQUANTA_NOENT;
+
+    rc = copy_to_user(user_name, name, sizeof(name));
+    return rc < 0 ? rc : 0;
 }
 
 static int64_t sys_page_release(uint64_t vaddr, uint64_t n_pages);
@@ -195,6 +272,31 @@ static int64_t sys_page_release(uint64_t vaddr, uint64_t n_pages) {
     return 0;
 }
 
+static int64_t sys_libos_fetch(uint64_t type, uint64_t user_name,
+                               uint64_t len) {
+    if (type > REALM_WIN32)
+        return -EQUANTA_INVAL;
+    if (len == 0 || len >= LIBOS_MODULE_NAME_MAX)
+        return -EQUANTA_INVAL;
+    if (!valid_user_ptr(user_name, len))
+        return -EQUANTA_FAULT;
+    if (!realm_current())
+        return -EQUANTA_FAULT;
+
+    char name[LIBOS_MODULE_NAME_MAX];
+    memset(name, 0, sizeof(name));
+    int rc = copy_from_user(name, user_name, (size_t)len);
+    if (rc < 0)
+        return rc;
+    name[LIBOS_MODULE_NAME_MAX - 1] = '\0';
+
+    const libos_module_t *m = libos_fetch_module((realm_type_t)type, name);
+    if (!m)
+        return -EQUANTA_NOENT;
+
+    return (int64_t)m->id;
+}
+
 // ── syscall_dispatch ──────────────────────────────────────────────────────
 int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -206,6 +308,15 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2,
 
     case SYS_WRITE:
         return sys_write(a1, a2, a3);
+
+    case SYS_OPEN:
+        return sys_open(a1, a2);
+
+    case SYS_CLOSE:
+        return sys_close(a1);
+
+    case SYS_STAT:
+        return sys_stat(a1, a2);
 
     case SYS_YIELD:
         sched_yield();
@@ -243,7 +354,20 @@ int64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2,
         return (int64_t)realm_destroy_current();
 
     case SYS_LIBOS_FETCH:
-        return -EQUANTA_NOSYS;  // Phase 5+
+        return sys_libos_fetch(a1, a2, a3);
+
+    case SYS_REBOOT:
+        if (!current_has_cap(CAP_POWER)) return -EQUANTA_PERM;
+        power_reboot();
+        __builtin_unreachable();
+
+    case SYS_SHUTDOWN:
+        if (!current_has_cap(CAP_POWER)) return -EQUANTA_PERM;
+        power_shutdown();
+        __builtin_unreachable();
+
+    case SYS_READDIR:
+        return sys_readdir(a1, a2, a3);
 
     default:
         return -EQUANTA_NOSYS;

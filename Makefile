@@ -99,7 +99,7 @@ TEST_USER_HDR := $(BUILD_DIR)/generated/realm/test_user_bin.h
 $(TEST_USER_ELF): $(TEST_USER_ASM)
 	@mkdir -p $(dir $@)
 	$(CC) -m64 -nostdlib -static -Wl,-Ttext=0x400000 -Wl,--no-dynamic-linker \
-	    -Wa,--noexecstack -Wl,-z,noexecstack $< -o $@
+	    -Wa,--noexecstack -Wa,-mx86-used-note=no -Wl,-z,noexecstack $< -o $@
 	@echo "[USER] $@"
 
 $(TEST_USER_HDR): $(TEST_USER_ELF)

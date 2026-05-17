@@ -26,14 +26,59 @@ static int        realm_pool_used = 0;
 
 // LibOS realm (created at boot, id=0)
 static realm_t   *libos_realm = NULL;
+static libos_module_t libos_modules[LIBOS_MAX_MODULES];
+static size_t libos_modules_used = 0;
+
+static int libos_register_module(realm_type_t type, const char *name,
+                                 const char *path, uint64_t size,
+                                 uint32_t flags);
+
+static const char *realm_type_name(realm_type_t type) {
+    switch (type) {
+    case REALM_NATIVE: return "native";
+    case REALM_WASM:   return "wasm";
+    case REALM_LINUX:  return "linux";
+    case REALM_WIN32:  return "win32";
+    default:           return "unknown";
+    }
+}
 
 // ── realm_system_init ─────────────────────────────────────────────────────
 void realm_system_init(void) {
     for (int i = 0; i < MAX_REALMS; i++)
         realm_pool[i] = NULL;
     realm_pool_used = 0;
+    libos_modules_used = 0;
     next_realm_id = 1;
     kprintf("[REALM] Realm system initialised  (max %d realms)\n", MAX_REALMS);
+}
+
+int realm_detect_binary(const void *binary, size_t size, realm_type_t *type) {
+    if (!binary || size < 4 || !type)
+        return -1;
+
+    const uint8_t *b = (const uint8_t *)binary;
+    if (b[0] == 0x7F && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') {
+        *type = REALM_NATIVE;
+        return 0;
+    }
+    if (b[0] == 0x00 && b[1] == 'a' && b[2] == 's' && b[3] == 'm') {
+        *type = REALM_WASM;
+        return 0;
+    }
+    if (b[0] == 'M' && b[1] == 'Z') {
+        *type = REALM_WIN32;
+        return 0;
+    }
+    return -1;
+}
+
+realm_t *realm_create_for_binary(const void *binary, size_t size,
+                                 const char *name) {
+    realm_type_t type;
+    if (realm_detect_binary(binary, size, &type) != 0)
+        return NULL;
+    return realm_create(type, name ? name : realm_type_name(type));
 }
 
 // ── realm_create ──────────────────────────────────────────────────────────
@@ -257,6 +302,59 @@ void libos_init(void) {
     vfs_mkdir("/libos/linux", VFS_MODE_DIR);
     vfs_mkdir("/libos/win32", VFS_MODE_DIR);
 
+    libos_register_module(REALM_NATIVE, "libquanta.so",
+                          "/libos/native/libquanta.so", 0, 0);
+    libos_register_module(REALM_WASM, "wasi_runtime.so",
+                          "/libos/wasm/wasi_runtime.so", 0, 0);
+
     kprintf("[LIBOS] LibOS realm #%u created  (CAP_LIBOS_MAP granted)\n",
             libos_realm->id);
+    kprintf("[LIBOS] Module registry ready  (%llu modules, WASM route prepared)\n",
+            (unsigned long long)libos_modules_used);
+}
+
+static int libos_register_module(realm_type_t type, const char *name,
+                                 const char *path, uint64_t size,
+                                 uint32_t flags) {
+    if (libos_modules_used >= LIBOS_MAX_MODULES || !name || !path)
+        return -1;
+
+    libos_module_t *m = &libos_modules[libos_modules_used];
+    memset(m, 0, sizeof(*m));
+    m->id = (uint32_t)(libos_modules_used + 1);
+    m->type = type;
+    m->size = size;
+    m->flags = flags;
+    strncpy(m->name, name, LIBOS_MODULE_NAME_MAX - 1);
+    strncpy(m->path, path, LIBOS_MODULE_PATH_MAX - 1);
+    libos_modules_used++;
+
+    int fd = vfs_open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    if (fd >= 0) {
+        const char *msg = "Quanta LibOS module placeholder\n";
+        vfs_write(fd, msg, strlen(msg));
+        vfs_close(fd);
+    }
+    return (int)m->id;
+}
+
+const libos_module_t *libos_fetch_module(realm_type_t type, const char *name) {
+    if (!name)
+        return NULL;
+    for (size_t i = 0; i < libos_modules_used; i++) {
+        if (libos_modules[i].type == type &&
+            strcmp(libos_modules[i].name, name) == 0)
+            return &libos_modules[i];
+    }
+    return NULL;
+}
+
+const libos_module_t *libos_module_at(size_t idx) {
+    if (idx >= libos_modules_used)
+        return NULL;
+    return &libos_modules[idx];
+}
+
+size_t libos_module_count(void) {
+    return libos_modules_used;
 }

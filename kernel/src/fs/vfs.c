@@ -143,7 +143,9 @@ int vfs_register(const char *path, vfs_node_t *node) {
 
 // ── FD helpers ────────────────────────────────────────────────────────────
 static int alloc_fd(void) {
-    for (int i = 0; i < VFS_MAX_OPEN_FDS; i++)
+    // Reserve 0/1/2 for process stdio. Ring 3 syscalls treat fd 0 as keyboard
+    // and fd 1/2 as console output, so VFS-backed descriptors start at 3.
+    for (int i = 3; i < VFS_MAX_OPEN_FDS; i++)
         if (!fd_table[i].valid) return i;
     return -1;
 }

@@ -11,12 +11,12 @@ and assembly, booted by Limine 8.7.0.
   ╚██████╔╝╚██████╔╝██║  ██║██║ ╚████║   ██║   ██║  ██║
    ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝
   Quanta OS  v2.0.0  (x86_64)
-  x2APIC · SMP · VirtIO · VFS · QAI Shell
+  x2APIC · SMP · VirtIO · VFS · Ring 3 Realms
 ```
 
 ---
 
-## What's New in Phase 2
+## What's New in Phase 4
 
 | Feature | Details |
 |---|---|
@@ -33,7 +33,10 @@ and assembly, booted by Limine 8.7.0.
 | **VirtIO-blk 1.1** | Split-ring virtqueue; PCIe ECAM via ACPI MCFG |
 | **VFS** | RamFS + DevFS (`/dev/null`, `/dev/zero`) |
 | **PS/2 Keyboard** | IRQ1; scancode-set-1; ring buffer; arrow keys |
-| **QAI Shell** | History, tab-complete, 17 built-in commands |
+| **Ring 3 native-init** | Primary user console running in a Native Realm |
+| **Realm syscalls** | stdio, VFS open/read/close/readdir/stat, realm id, pages, power |
+| **LibOS registry** | Kernel-managed LibOS Realm and runtime module lookup |
+| **QAI Shell** | Kernel fallback/debug shell with history and tab-complete |
 | **QAI Assistant** | Compiled-in OS knowledge base; keyword scoring |
 
 ---
@@ -51,7 +54,7 @@ quanta/
     │   └── limine.h            Limine protocol v2 header (all requests)
     │
     └── src/
-        ├── kmain.c             Kernel entry — 18-step init sequence
+        ├── kmain.c             Kernel entry — boots into Ring 3 native-init
         │
         ├── boot/
         │   ├── limine_requests.h   Inline accessors for all responses
@@ -136,8 +139,10 @@ kmain()
   14. vfs_init()                 ramfs at /; devfs at /dev
   15. virtio_init()              PCIe ECAM scan → virtio-blk 1.1 driver
   16. keyboard_init()            PS/2 IRQ1; scancode-set-1 decoder
-  17. sti + sched_yield()        Enable interrupts; hand off to scheduler
-  18. QAI shell task             task_create → sched_add → runs on CPU 0
+  17. syscall_init()             Program SYSCALL/SYSRET MSRs
+  18. realm_system_init()        Realm table + LibOS Realm
+  19. native-init Realm          Embedded ELF enters Ring 3
+  20. QAI shell fallback         Only created if native-init fails
 ```
 
 ### Memory Layout
@@ -246,6 +251,20 @@ I/O (virtio_blk_read / virtio_blk_write):
   Busy-wait on status byte (≠ 0xFF)
 ```
 
+### User Consoles
+
+The normal boot path starts `native-init`, a small Ring 3 console loaded as an
+ELF into a Native Realm. It uses syscalls for keyboard input, console output,
+identity, LibOS lookup, and realm-owned page mapping.
+
+```
+r3:/ $ help
+commands: help ls cat wasm pid realm libos page game reboot shutdown exit
+```
+
+The QAI shell is still present, but it is now the kernel debug fallback rather
+than the primary user session.
+
 ### QAI Shell
 
 ```
@@ -313,7 +332,7 @@ qemu-system-x86_64 -M q35 -m 512M -smp 4,cores=4 \
   ██████╗ ██╗   ██╗ █████╗ ███╗   ██╗████████╗ █████╗
   ...
   Quanta OS  v2.0.0  (x86_64)
-  x2APIC  ·  SMP  ·  VirtIO  ·  VFS  ·  QAI Shell
+  x2APIC  ·  SMP  ·  VirtIO  ·  VFS  ·  Ring 3 Realms
 ====================================================================
   Bootloader : Limine 8.7.0
   Kernel     : phys 0x1000000  virt 0xffffffff80000000
@@ -342,10 +361,12 @@ qemu-system-x86_64 -M q35 -m 512M -smp 4,cores=4 \
 [KBD] Initialising PS/2 keyboard...
 ====================================================================
   Quanta OS initialised successfully.
-  4 CPU(s) online  |  x2APIC  |  VFS ready
+  4 CPU(s) online  |  x2APIC  |  VFS ready  |  Realm ready
 ====================================================================
 
-quanta@kernel:~$ _
+[Ring3 Init] Quanta Native Realm console online.
+Type 'help' for user-mode commands.
+r3:/ $ _
 ```
 
 ---

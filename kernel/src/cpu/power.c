@@ -209,15 +209,20 @@ void power_init(void) {
 __attribute__((noreturn)) void power_reboot(void) {
   __asm__ volatile("cli");
 
-  // ── Method 1: ACPI FADT reset register (I/O space only for simplicity) ─
+  // ── Method 1: PCIe/PIIX "system reset" via port 0xCF9 ────────────────
+  // This is the fast path in QEMU and on many PC chipsets.
+  _outb(0xCF9, 0x06);
+  for (volatile int i = 0; i < 10000; i++)
+    __asm__ volatile("pause");
+
+  // ── Method 2: ACPI FADT reset register (I/O space only for simplicity) ─
   if (g_has_reset && g_reset_space == 1 /* I/O */ && g_reset_addr) {
     _outb((uint16_t)(g_reset_addr & 0xFFFF), g_reset_val);
-    // Spin briefly to let hardware catch up
-    for (volatile int i = 0; i < 2000000; i++)
+    for (volatile int i = 0; i < 10000; i++)
       __asm__ volatile("pause");
   }
 
-  // ── Method 2: PS/2 keyboard-controller reset pulse ────────────────────
+  // ── Method 3: PS/2 keyboard-controller reset pulse ────────────────────
   // Flush the KBC output buffer, then pulse the CPU reset line.
   {
     int timeout = 65536;
@@ -232,18 +237,18 @@ __attribute__((noreturn)) void power_reboot(void) {
     }
     _outb(0x64, 0xFE); // pulse RESET# line
   }
-  for (volatile int i = 0; i < 2000000; i++)
+  for (volatile int i = 0; i < 10000; i++)
     __asm__ volatile("pause");
 
-  // ── Method 3: PCIe/PIIX "system reset" via port 0xCF9 ────────────────
+  // ── Method 4: Alternate CF9 sequence ─────────────────────────────────
   _outb(0xCF9, 0x02); // SYS_RST
-  for (volatile int i = 0; i < 100000; i++)
+  for (volatile int i = 0; i < 10000; i++)
     __asm__ volatile("pause");
   _outb(0xCF9, 0x06); // full reset
-  for (volatile int i = 0; i < 2000000; i++)
+  for (volatile int i = 0; i < 10000; i++)
     __asm__ volatile("pause");
 
-  // ── Method 4: Triple fault (always works on x86; last resort) ────────
+  // ── Method 5: Triple fault (always works on x86; last resort) ────────
   __asm__ volatile(
       "lidt (%%rsp)\n" // load a zero-limit IDT so any fault → triple-fault
       "ud2\n"          // raise invalid opcode (guaranteed exception)

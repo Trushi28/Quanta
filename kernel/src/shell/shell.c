@@ -28,6 +28,7 @@
 #include "../lib/string.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
+#include "../realm/realm.h"
 #include "../sched/sched.h"
 #include "../version.h"
 #include "editor.h"
@@ -1403,9 +1404,6 @@ static int cmd_reboot(int argc, char **argv) {
   fb_set_color(0xFF9922, FB_COLOR_BLACK);
   kprintf("  Rebooting system...\n");
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
-  // Brief delay so the message renders
-  for (volatile int i = 0; i < 50000000; i++)
-    __asm__ volatile("pause");
   power_reboot(); // never returns
 }
 
@@ -1473,8 +1471,7 @@ static int cmd_dodge(int argc, char **argv) {
           kprintf("  Press any key to return to shell.\n");
           fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
           kbd_getchar();
-          fb_statusbar_set("Quanta OS v" QUANTA_VERSION
-                           "  |  help  top  free  ls  edit  calc  ai");
+          fb_statusbar_set("Quanta Phase 5  |  help  libos  wasm  dodge  edit  ai");
           fb_statusbar_refresh();
           kprintf("\033[2J\033[H");
           return 0;
@@ -1520,10 +1517,101 @@ static int cmd_dodge(int argc, char **argv) {
     sched_sleep_ms(85);
   }
 
-  fb_statusbar_set("Quanta OS v" QUANTA_VERSION
-                   "  |  help  top  free  ls  edit  calc  ai");
+  fb_statusbar_set("Quanta Phase 5  |  help  libos  wasm  dodge  edit  ai");
   fb_statusbar_refresh();
   kprintf("\033[2J\033[H");
+  return 0;
+}
+
+static const char *shell_realm_type_name(realm_type_t type) {
+  switch (type) {
+  case REALM_NATIVE:
+    return "native";
+  case REALM_WASM:
+    return "wasm";
+  case REALM_LINUX:
+    return "linux";
+  case REALM_WIN32:
+    return "win32";
+  default:
+    return "unknown";
+  }
+}
+
+// ── libos — Phase 5 registry view ───────────────────────────────────────
+static int cmd_libos(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+  fb_set_color(0x33DDCC, FB_COLOR_BLACK);
+  kprintf("\n  LibOS module registry\n");
+  fb_draw_hline('-', 0x335577, FB_COLOR_BLACK);
+
+  size_t count = libos_module_count();
+  if (!count) {
+    fb_set_color(0xFF9922, FB_COLOR_BLACK);
+    kprintf("  No modules registered.\n\n");
+    fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
+    return 0;
+  }
+
+  for (size_t i = 0; i < count; i++) {
+    const libos_module_t *m = libos_module_at(i);
+    if (!m)
+      continue;
+    fb_set_color(0xAADDFF, FB_COLOR_BLACK);
+    kprintf("  #%u  %-6s  ", m->id, shell_realm_type_name(m->type));
+    fb_set_color(0xFFFFFF, FB_COLOR_BLACK);
+    kprintf("%s", m->name);
+    fb_set_color(0x778899, FB_COLOR_BLACK);
+    kprintf("  %s\n", m->path);
+  }
+  fb_set_color(0x778899, FB_COLOR_BLACK);
+  kprintf("\n  SYS_LIBOS_FETCH(type, name, len) returns the module id.\n\n");
+  fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
+  return 0;
+}
+
+// ── wasm — Phase 5 binary routing probe ─────────────────────────────────
+static int cmd_wasm(int argc, char **argv) {
+  if (argc < 2) {
+    shell_print("Usage: wasm <file>\n");
+    return 1;
+  }
+
+  char path[VFS_PATH_MAX];
+  resolve_path(argv[1], path, sizeof(path));
+  int fd = vfs_open(path, O_RDONLY);
+  if (fd < 0) {
+    fb_set_color(0xFF9922, FB_COLOR_BLACK);
+    kprintf("  Cannot open %s\n", path);
+    fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
+    return 1;
+  }
+
+  uint8_t hdr[8] = {0};
+  ssize_t n = vfs_read(fd, hdr, sizeof(hdr));
+  vfs_close(fd);
+  if (n < 4) {
+    shell_print("  File too small for binary detection.\n");
+    return 1;
+  }
+
+  realm_type_t type;
+  if (realm_detect_binary(hdr, (size_t)n, &type) != 0) {
+    shell_print("  Unknown binary format.\n");
+    return 1;
+  }
+
+  fb_set_color(0x33DDCC, FB_COLOR_BLACK);
+  kprintf("  %s -> %s Realm\n", path, shell_realm_type_name(type));
+  if (type == REALM_WASM) {
+    const libos_module_t *m = libos_fetch_module(REALM_WASM, "wasi_runtime.so");
+    fb_set_color(0xAADDFF, FB_COLOR_BLACK);
+    kprintf("  WASM route ready: %s\n", m ? m->path : "(runtime missing)");
+    fb_set_color(0x778899, FB_COLOR_BLACK);
+    kprintf("  Runtime execution comes next: embed wasm3 or a native WASM VM.\n");
+  }
+  fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
   return 0;
 }
 
@@ -1545,7 +1633,7 @@ static int cmd_version(int argc, char **argv) {
   fb_set_color(0x778899, FB_COLOR_BLACK);
   kprintf(
       "| x86-64 | x2APIC | SMP | VirtIO | QuantaFS | KV | QAI | Editor | Realm\n"
-      "| Foundation complete -> Next: WASM Runtime Realm and LibOS module fetch\n"
+      "| Phase 5 started -> LibOS registry + WASM binary routing\n"
       "+----------------------------------------------------------------------------+\n\n");
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
   return 0;
@@ -1609,6 +1697,8 @@ static void register_builtins(void) {
   shell_register_cat("top", "All tasks with CPU/tick stats", "System", cmd_top);
   shell_register_cat("tasks", "Alias for top", "System", cmd_tasks);
   shell_register_cat("disk", "VirtIO block device info", "System", cmd_disk);
+  shell_register_cat("libos", "List LibOS runtime modules", "System", cmd_libos);
+  shell_register_cat("wasm", "Detect/route a WASM binary", "System", cmd_wasm);
   shell_register_cat("reboot", "Reboot the system (ACPI + KBC fallback)",
                      "System", cmd_reboot);
   shell_register_cat("shutdown", "Power off the system (ACPI S5)", "System",
@@ -1707,7 +1797,7 @@ void shell_run(void *arg) {
   cmd_version(0, NULL);
   fb_set_color(0x778899, FB_COLOR_BLACK);
   kprintf("  [keys] Tab=complete  Up/Down=history  Left/Right=cursor\n");
-  kprintf("  [cmds] help  top  free  ls -l  edit <file>  calc <expr>  dodge\n");
+  kprintf("  [cmds] help  top  free  libos  wasm <file>  edit  dodge\n");
   kprintf("  [ops ] shutdown  reboot  grep  wc  which  uname  motd\n");
   fb_set_color(FB_COLOR_WHITE, FB_COLOR_BLACK);
   fb_draw_hline('-', 0x335577, FB_COLOR_BLACK);

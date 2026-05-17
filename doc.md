@@ -409,6 +409,9 @@ Argument convention (follows Linux x86-64 ABI):
 |---|---|---|---|
 | 0 | `SYS_READ` | `read(fd, buf, len)` | Read from file descriptor |
 | 1 | `SYS_WRITE` | `write(fd, buf, len)` | Write to file descriptor |
+| 2 | `SYS_OPEN` | `open(path, flags)` | Open a VFS path; descriptors start at 3 |
+| 3 | `SYS_CLOSE` | `close(fd)` | Close a VFS descriptor |
+| 4 | `SYS_STAT` | `stat(path, stat_buf)` | Copy VFS metadata to Ring 3 |
 | 24 | `SYS_YIELD` | `yield()` | Voluntarily yield CPU |
 | 35 | `SYS_SLEEP` | `sleep_ms(ms)` | Sleep N milliseconds |
 | 39 | `SYS_GETPID` | `getpid()` | Return current task PID |
@@ -436,7 +439,15 @@ Argument convention (follows Linux x86-64 ABI):
 | 205 | `SYS_REALM_EXIT` | `realm_exit(code)` | Terminate entire Realm |
 | 206 | `SYS_LIBOS_FETCH` | `libos_fetch(type, name, len)` | Request LibOS module mapping |
 
-**Total: 13 syscalls.** Everything else is handled in Ring 3 by the LibOS.
+### Power Operations
+
+| Number | Name | Signature | Description |
+|---|---|---|---|
+| 207 | `SYS_REBOOT` | `reboot()` | Reboot system; requires `CAP_POWER` |
+| 208 | `SYS_SHUTDOWN` | `shutdown()` | Power off system; requires `CAP_POWER` |
+| 209 | `SYS_READDIR` | `readdir(fd, idx, name_buf)` | Read a directory entry name |
+
+**Total: 19 syscalls.** Everything else is handled in Ring 3 by the LibOS.
 
 ---
 
@@ -802,6 +813,7 @@ hardware directly — all access is mediated by capability tokens.
 | `CAP_NETWORK` | Network device access | Granted per policy |
 | `CAP_LIBOS_MAP` | Map pages into other Realms | LibOS only |
 | `CAP_REALM_CREATE` | Create new Realms | Native Realm, init only |
+| `CAP_POWER` | Reboot / shutdown authority | Native init only |
 
 ## Enforcement
 
@@ -880,16 +892,19 @@ libos_init()            Create LibOS Realm, grant CAP_LIBOS_MAP
                         Mount /libos/ on VFS
                         Pre-load native libquanta.so into LibOS cache
 realm_create_init()     Create initial Native Realm
-                        Load /init binary (Quanta shell or init process)
-                        Enter Ring 3 — kernel never returns to shell_run()
+                        Load embedded native-init ELF
+                        Enter Ring 3 native console
+                        Kernel QAI shell is debug fallback only
 ```
 
 ---
 
 ## Stage 5 — Ring 3 Execution
 
-After Stage 4, the kernel's boot path ends. All user-facing activity happens in Ring 3
-inside Realms. The kernel runs only when:
+After Stage 4, the kernel's boot path hands off to the native-init Realm. Normal
+user-facing activity happens in Ring 3 inside Realms. The kernel QAI shell is kept
+only as a debug fallback if native-init cannot be created. The kernel otherwise runs
+only when:
 
 - A syscall is issued (SYSCALL/SYSRET crossing)
 - An interrupt fires (timer tick, keyboard, device)
@@ -963,7 +978,7 @@ FMASK       = 0x200            Clear IF on syscall entry (disable interrupts)
 | QAI shell | ✅ Done | 40+ commands, editor, calc, grep |
 | QAI assistant | ✅ Done | Keyword KB, live system data |
 
-## Phase 4 — In Progress
+## Phase 4 — Complete
 
 | Component | Status | Depends On |
 |---|---|---|
@@ -976,17 +991,20 @@ FMASK       = 0x200            Clear IF on syscall entry (disable interrupts)
 | User address space builder | Done | VMM |
 | ELF64 segment loader | Done | VMM, realm_t |
 | LibOS Realm foundation | Done | realm_t |
-| `SYS_LIBOS_FETCH` | Stubbed | LibOS + VFS |
-| First Ring 3 task | Done | All above |
+| `SYS_LIBOS_FETCH` | Done | LibOS + VFS |
+| `SYS_REBOOT` / `SYS_SHUTDOWN` | Done | CAP_POWER |
+| Ring 3 native init console | Done | All above |
 
 ---
 
 # Part XIV — Roadmap
 
-## Phase 4 — Ring 3 Foundation (Current)
+## Phase 4 — Ring 3 Foundation (Complete)
 
-Establish the kernel↔Ring 3 boundary. Prove a task can execute in Ring 3
-and return via syscall.
+Establish the kernel↔Ring 3 boundary. Quanta now boots into a persistent
+native-init console running in Ring 3, not the Ring 0 QAI shell. The console uses
+the syscall ABI for output, keyboard input, identity, LibOS lookup, and realm-owned
+page mapping.
 
 Deliverables:
 - SYSCALL/SYSRET trampoline + syscall_dispatch
@@ -995,19 +1013,26 @@ Deliverables:
 - ELF64 binary loader (PT_LOAD segments, RX/RW/RO)
 - Page fault handler: user faults contained, kernel faults panic
 - LibOS Realm created at boot with CAP_LIBOS_MAP
-- First Ring 3 task: trivial binary calls SYS_WRITE then SYS_EXIT
+- `SYS_READ(0)` routes PS/2 keyboard input into Ring 3 user buffers
+- VFS-backed Ring 3 `open`, `close`, `stat`, and `readdir`; fd 0/1/2 are reserved for stdio
+- `SYS_LIBOS_FETCH` resolves registered LibOS runtime modules
+- Capability-gated `SYS_REBOOT` and `SYS_SHUTDOWN` for native-init
+- Native Ring 3 init console: `help`, `ls`, `cat`, `wasm`, `pid`, `realm`, `libos`, `page`, `game`, `reboot`, `shutdown`, `exit`
+- Kernel QAI shell remains available only as a debug fallback if native-init fails
 
 ---
 
-## Phase 5 — WASM Runtime Realm
+## Phase 5 — WASM Runtime Realm (Started)
 
 First working compatibility Realm. Chosen because WASM has the simplest
 binary format, a fully open spec, and lightweight existing runtimes.
 
 Deliverables:
+- LibOS module registry and `SYS_LIBOS_FETCH` route (done)
+- WASM binary detection and routing from Ring 3 native-init (done)
+- Seed `/apps/hello.wasm` in VFS for routing tests (done)
 - wasm3 embedded as WASM LibOS module
 - WASI snapshot preview 1 syscall surface
-- WASM binary detection and routing
 - Running a "hello world" WASM binary from VFS
 
 ---

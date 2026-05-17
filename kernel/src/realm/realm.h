@@ -39,6 +39,7 @@ typedef enum {
 #define CAP_NETWORK      (1u << 5)
 #define CAP_LIBOS_MAP    (1u << 6)
 #define CAP_REALM_CREATE (1u << 7)
+#define CAP_POWER        (1u << 8)
 
 // Default capabilities for application realms
 #define CAP_DEFAULT  (CAP_VFS | CAP_PAGES)
@@ -47,6 +48,9 @@ typedef enum {
 #define REALM_MAX_TASKS  32
 #define REALM_NAME_MAX   32
 #define MAX_REALMS       64
+#define LIBOS_MODULE_NAME_MAX 32
+#define LIBOS_MODULE_PATH_MAX 80
+#define LIBOS_MAX_MODULES     16
 
 // ── Realm kernel object ──────────────────────────────────────────────────
 typedef struct realm {
@@ -66,6 +70,15 @@ typedef struct realm {
     list_node_t      list;              // global realm list node
 } realm_t;
 
+typedef struct {
+    uint32_t     id;
+    realm_type_t type;
+    char         name[LIBOS_MODULE_NAME_MAX];
+    char         path[LIBOS_MODULE_PATH_MAX];
+    uint64_t     size;
+    uint32_t     flags;
+} libos_module_t;
+
 // ── Lifecycle API ─────────────────────────────────────────────────────────
 void     realm_system_init(void);
 realm_t *realm_create(realm_type_t type, const char *name);
@@ -73,6 +86,9 @@ int      realm_destroy(uint32_t id);
 int      realm_destroy_current(void);
 struct task *realm_exec(realm_t *r, const void *binary, size_t size,
                         const char *task_name, uint32_t cpu_affinity);
+int      realm_detect_binary(const void *binary, size_t size, realm_type_t *type);
+realm_t *realm_create_for_binary(const void *binary, size_t size,
+                                 const char *name);
 
 // ── Queries ───────────────────────────────────────────────────────────────
 realm_t *realm_find(uint32_t id);
@@ -84,3 +100,6 @@ void realm_remove_task(realm_t *r, struct task *t);
 
 // ── LibOS init (Phase 4 placeholder) ──────────────────────────────────────
 void libos_init(void);
+const libos_module_t *libos_fetch_module(realm_type_t type, const char *name);
+const libos_module_t *libos_module_at(size_t idx);
+size_t libos_module_count(void);
